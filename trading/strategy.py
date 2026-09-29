@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import sys
 import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -36,11 +37,30 @@ from trading.config import (
     AVWAP_RR, AVWAP_ATR_MULT, AVWAP_RSI_LEN, AVWAP_EMA_LEN, AVWAP_VOL_MULT,
 )
 from trading.costs import round_trip as round_trip_charges
+from trading.exits import TrailState, trail_config_from_settings, update_exit
 from trading.execution_router import ExecutionRouter
 from trading.ledger import Ledger
 from trading.notify import notify
 
 IST = ZoneInfo("Asia/Kolkata")
+
+
+@dataclass
+class Signal:
+    symbol: str
+    side: str
+    price: float
+    stop_loss: float
+    target: float
+    strategy_id: str
+    trend_state: str = "unavailable"
+
+
+class Strategy:
+    strategy_id: str = "base"
+
+    def evaluate(self, df: pd.DataFrame, symbol: str) -> Signal | None:
+        raise NotImplementedError
 
 # Consecutive no-data scans before the engine gives up and asks to be restarted.
 # At POLL_SECONDS=60 that is five minutes of blindness.
@@ -384,6 +404,13 @@ STRATEGIES = {
         "stop": swing_stop, "rr": RR_TARGET,
         "bias": lambda bar: bar["ema_fast"] > bar["ema_slow"],
     },
+    # ORB + Multi-TF 200 MA trend-filter strategy
+    "orb_ma200": {
+        "id": "orb_ma200",
+        "instance": None,
+        "prepare": lambda df: df,
+        "bias": lambda bar: True,
+    },
 }
 
 
@@ -396,10 +423,17 @@ def market_open_now() -> bool:
 
 
 class Engine:
-    def __init__(self, router: ExecutionRouter, ledger: Ledger, strategy: str = "ema"):
+    def __init__(self, router: ExecutionRouter, ledger: Ledger, strategy: str = "ema",
+                 trail_config=None):
         self.strat = STRATEGIES[strategy]
+        if "instance" in self.strat and self.strat["instance"] is None:
+            from trading.strategies.orb_ma200 import ORBMA200Strategy
+            self.strat["instance"] = ORBMA200Strategy()
         self.router = router
         self.ledger = ledger
+        # Trailing-stop toggle. Defaults to the system setting (off), so backtest and live
+        # run one implementation from one flag.
+        self.trail_config = trail_config or trail_config_from_settings()
         self.prices: dict[str, float] = {}
         router.get_ltp = lambda sym: self.prices[sym]
         # open positions: symbol -> state (re-synced from ledger on start)
@@ -408,10 +442,27 @@ class Engine:
             self.open[t["symbol"]] = {
                 "trade_id": t["id"], "side": t["side"], "qty": t["qty"],
                 "entry": t["entry_price"], "sl": t["stop_loss"],
+                # initial_stop is 1R's anchor; rows predating that column fall back to
+                # the stop as stored, which is the pre-trailing behaviour.
+                "initial_sl": t["initial_stop"] or t["stop_loss"],
                 "target": t["target"], "mae": 0.0, "mfe": 0.0,
             }
         self.last_bar: dict[str, object] = {}
         self.blind_scans = 0        # consecutive scans that returned no data
+
+    def _bar_atr(self, df: pd.DataFrame) -> float:
+        """ATR(14) at the latest bar, for the chandelier trail. 0.0 when unavailable --
+        the breakeven floor still holds, there is simply no trail leg."""
+        if not self.trail_config.enabled or df.empty:
+            return 0.0
+        if not {"High", "Low", "Close"} <= set(df.columns):
+            return 0.0
+        from trading.strategies.orb_ma200 import _atr
+        series = _atr(df, 14)
+        if series.empty:
+            return 0.0
+        val = series.iloc[-1]
+        return 0.0 if val != val else float(val)  # NaN -> no trail leg
 
     def size(self, price: float, risk_per_share: float) -> int:
         if risk_per_share <= 0 or price <= 0:
@@ -426,34 +477,49 @@ class Engine:
     def try_enter(self, symbol: str, df: pd.DataFrame, ts: float):
         if symbol in self.open:
             return
-        side = self.strat["detect"](df)
-        if side is None:
-            return
-        price = float(df.iloc[-1]["Close"])
-        sl = self.strat["stop"](df, side)
-        risk = (price - sl) if side == "BUY" else (sl - price)
+        if "instance" in self.strat and self.strat["instance"] is not None:
+            sig = self.strat["instance"].evaluate(df, symbol)
+            if sig is None:
+                return
+            side = sig.side
+            price = sig.price
+            sl = sig.stop_loss
+            target = sig.target
+            risk = (price - sl) if side == "BUY" else (sl - price)
+        else:
+            side = self.strat["detect"](df)
+            if side is None:
+                return
+            price = float(df.iloc[-1]["Close"])
+            sl = self.strat["stop"](df, side)
+            risk = (price - sl) if side == "BUY" else (sl - price)
+            if risk <= 0:
+                return
+            if "target" in self.strat:
+                target = self.strat["target"](df, side, price, sl)
+                if target is None:
+                    return              # reversion doesn't pay enough — skip
+            else:
+                rr = self.strat["rr"]
+                target = price + rr * risk if side == "BUY" else price - rr * risk
         if risk <= 0:
             return
-        if "target" in self.strat:
-            target = self.strat["target"](df, side, price, sl)
-            if target is None:
-                return              # reversion doesn't pay enough — skip
-        else:
-            rr = self.strat["rr"]
-            target = price + rr * risk if side == "BUY" else price - rr * risk
         qty = self.size(price, risk)
         if qty < 1:
             return
         self.prices[symbol] = price
+        trend_state = getattr(sig, "trend_state", "up" if side == "BUY" else "down") if "instance" in self.strat and self.strat["instance"] is not None else ("up" if side == "BUY" else "down")
         signal = {"symbol": symbol, "side": side, "qty": qty, "price": price,
-                  "ts": ts, "stop_loss": round(sl, 2), "target": round(target, 2),
+                  "ts": ts, "stop_loss": round(sl, 2), "initial_stop": round(sl, 2),
+                  "target": round(target, 2),
                   "strategy_id": self.strat["id"],
-                  "regime": self.router.day_config.get("regime")}
+                  "regime": self.router.day_config.get("regime"),
+                  "trend_state": trend_state}
         trade_id = self.router.execute(signal)
         if trade_id:
             self.open[symbol] = {"trade_id": trade_id, "side": side, "qty": qty,
-                                 "entry": price, "sl": sl, "target": target,
-                                 "mae": 0.0, "mfe": 0.0}
+                                 "entry": price, "sl": sl, "initial_sl": sl,
+                                 "target": target, "mae": 0.0, "mfe": 0.0}
             print(f"ENTER {side} {symbol} x{qty} @ ~{price:.2f} sl={sl:.2f} tgt={target:.2f}")
             notify(f"📈 ENTRY {side} {symbol}",
                    f"×{qty} @ ~{price:.2f} · SL {sl:.2f} · TGT {target:.2f} (python engine)")
@@ -465,10 +531,37 @@ class Engine:
             if not reason.startswith(("max_open_positions", "rate_limit")):
                 notify(f"🚫 REJECTED {side} {symbol}", f"×{qty} @ {price:.2f} — {reason}")
 
-    def manage_open(self, symbol: str, bar: pd.Series):
+    def manage_open(self, symbol: str, bar: pd.Series, atr: float | None = None):
+        """Advance one open position by the latest closed bar.
+
+        The trailing stop is applied BEFORE the exit tests using the previous bars' data
+        only, so a bar is never tested against a stop derived from its own close. This is
+        the same ordering as backtest.py's _manage() and the research harness.
+        """
         pos = self.open.get(symbol)
         if pos is None:
             return
+
+        trail_config = self.trail_config
+        if trail_config.enabled:
+            risk_per_share = abs(pos["entry"] - pos.get("initial_sl", pos["sl"]))
+            pos.setdefault("trail", TrailState())
+            new_sl, pos["trail"], partial_qty = update_exit(
+                pos["entry"], pos["side"], pos["sl"], float(bar["Close"]), float(atr or 0.0),
+                pos["trail"], qty=pos["qty"], risk_per_share=risk_per_share,
+                config=trail_config,
+            )
+            if new_sl != pos["sl"]:
+                pos["sl"] = new_sl
+                # Mirror the move into the open ledger row so a restart, the supervisor
+                # agent, and the dashboard all see the stop the engine is actually using.
+                self.ledger.update_open_stop(pos["trade_id"], new_sl)
+            if partial_qty > 0:
+                self._book_partial(symbol, partial_qty, float(bar["Close"]))
+
+        pos = self.open.get(symbol)
+        if pos is None:
+            return  # a partial cannot close the whole position, but stay defensive
         lo, hi = float(bar["Low"]), float(bar["High"])
         direction = 1 if pos["side"] == "BUY" else -1
         pos["mae"] = min(pos["mae"], direction * ((lo if direction == 1 else hi) - pos["entry"]))
@@ -487,6 +580,35 @@ class Engine:
                 exit_price = pos["target"]
         if exit_price is not None:
             self._close(symbol, exit_price)
+
+    def _book_partial(self, symbol: str, partial_qty: int, price: float):
+        """Realise part of an open position at market, leaving the rest trailing.
+
+        Recorded as its own trade row (entry at the parent's entry, exit at the booking
+        price) so each row stays a complete, readable record and the extra sell leg's
+        charges are priced properly. The parent row's qty is reduced to match, otherwise
+        its final exit would count the booked shares a second time.
+        """
+        pos = self.open.get(symbol)
+        if pos is None:
+            return
+        partial_qty = min(partial_qty, pos["qty"] - 1)
+        if partial_qty < 1:
+            return
+        child_signal = {
+            "symbol": symbol, "side": pos["side"], "qty": partial_qty,
+            "ts": time.time(), "stop_loss": pos["sl"], "target": pos["target"],
+            "strategy_id": self.strat["id"], "regime": self.router.day_config.get("regime"),
+        }
+        child_id = self.ledger.record_entry(child_signal, pos["entry"])
+        charges = round_trip_charges(pos["entry"], price, partial_qty)
+        pnl = self.ledger.record_exit(child_id, round(price, 2), charges=round(charges, 2))
+        self.ledger.reduce_open_qty(pos["trade_id"], pos["qty"] - partial_qty)
+        pos["qty"] -= partial_qty
+        print(f"PARTIAL {pos['side']} {symbol} x{partial_qty} @ {price:.2f} -> pnl {pnl:.2f} "
+              f"({pos['qty']} left trailing, sl {pos['sl']:.2f})")
+        notify(f"💰 PARTIAL {pos['side']} {symbol}",
+               f"×{partial_qty} @ {price:.2f} → P&L {pnl:+.2f} INR · {pos['qty']} left, SL {pos['sl']:.2f}")
 
     def _close(self, symbol: str, exit_price: float):
         pos = self.open.pop(symbol)
@@ -540,7 +662,7 @@ class Engine:
             if self.last_bar.get(symbol) == df.index[-1]:
                 continue  # already acted on this bar
             self.last_bar[symbol] = df.index[-1]
-            self.manage_open(symbol, bar)
+            self.manage_open(symbol, bar, atr=self._bar_atr(df))
             if entries_ok:
                 self.try_enter(symbol, df, ts=df.index[-1].timestamp())
             if self.strat["bias"](bar):
@@ -607,7 +729,7 @@ class Engine:
                 window = self.strat["prepare"](df.iloc[: idx + 1])
                 bar = window.iloc[-1]
                 self.prices[symbol] = float(bar["Close"])
-                self.manage_open(symbol, bar)
+                self.manage_open(symbol, bar, atr=self._bar_atr(window))
                 self.try_enter(symbol, window, ts=ts.timestamp())
         self.squareoff("replay EOD")
         print(f"\nreplay done — day P&L: {self.ledger.day_realized_pnl():.2f} INR "

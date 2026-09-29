@@ -50,6 +50,8 @@ import yfinance as yf
 
 from trading import strategy as strat_mod
 from trading.costs import round_trip as real_charges
+from trading.exits import TrailState, trail_config_from_settings, update_exit
+from trading.strategies.orb_ma200 import _atr
 from trading.config import (
     SCAN_UNIVERSE, YF_SUFFIX, CANDLE_INTERVAL, RISK_PER_TRADE,
     MAX_POSITION_VALUE, MAX_OPEN_POSITIONS, DAILY_LOSS_LIMIT,
@@ -210,6 +212,10 @@ class BTTrade:
     charges: float = 0.0
     mae: float = 0.0
     mfe: float = 0.0
+    # Trailing-stop bookkeeping. ``initial_sl`` is 1R's anchor -- once the stop moves it
+    # cannot be recovered from ``sl``. ``trail`` is the caller-owned accumulator.
+    initial_sl: float | None = None
+    trail: TrailState = field(default_factory=TrailState)
 
     @property
     def net(self) -> float:
@@ -243,12 +249,17 @@ class Backtester:
                  daily_loss_limit: float = DAILY_LOSS_LIMIT,
                  slippage: float = SLIPPAGE_PCT,
                  charges: float | None = None,
-                 squareoff: str = SQUAREOFF_TIME):
+                 squareoff: str = SQUAREOFF_TIME,
+                 trail_config=None):
         """charges: None (default) uses the itemised Zerodha model in
         trading.costs, which prices the Rs-20-per-order brokerage cap
         correctly. Pass a float to fall back to the flat-percent model that
         strategy.py currently uses (for comparison), or 0.0 for a
-        frictionless upper bound."""
+        frictionless upper bound.
+
+        trail_config: None (default) reads the system toggle
+        (config.TRAIL_ENABLED, off), so this harness and the live paper loop
+        share one implementation and cannot drift."""
         self.strat = strat
         self.risk_inr = risk_per_trade * risk_multiplier
         self.max_position_value = max_position_value
@@ -257,6 +268,9 @@ class Backtester:
         self.slippage = slippage
         self.charges_pct = charges
         self.squareoff = squareoff
+        self.trail_config = (
+            trail_config if trail_config is not None else trail_config_from_settings()
+        )
 
     def charges_for(self, entry: float, exit_price: float, qty: int) -> float:
         if self.charges_pct is None:
@@ -279,9 +293,24 @@ class Backtester:
         # Indicators are causal (ewm / groupby-cumsum / rolling), so computing
         # them once over full history is identical to recomputing per bar --
         # and orders of magnitude faster than replay()'s O(n^2) slicing.
+        for s, df in frames.items():
+            if not df.empty and "symbol" not in df.attrs:
+                df.attrs["symbol"] = s
         prepared = {s: self.strat["prepare"](df) for s, df in frames.items() if not df.empty}
+        for s, df in prepared.items():
+            if not df.empty and "symbol" not in df.attrs:
+                df.attrs["symbol"] = s
         stamps = sorted({ts for df in prepared.values() for ts in df.index})
         res = Result(label=label or self.strat["id"], bars=len(stamps))
+
+        # ATR(14) for the chandelier trail, from the same definition the strategy uses.
+        # Computed once per symbol; only when trailing is on, so the default path is
+        # untouched. ``_atr`` needs OHLC, which every prepared frame has.
+        atr_by_sym: dict[str, pd.Series] = {}
+        if self.trail_config.enabled:
+            for s, df in prepared.items():
+                if {"High", "Low", "Close"} <= set(df.columns):
+                    atr_by_sym[s] = _atr(df, 14)
 
         open_pos: dict[str, BTTrade] = {}
         day_pnl = 0.0
@@ -308,8 +337,9 @@ class Backtester:
                 #    position opened at bar i's close is only ever tested
                 #    against bar i+1 onward. No look-ahead.
                 if sym in open_pos:
-                    closed = self._manage(open_pos, sym, bar, ts, res, squared_off)
-                    if closed is not None:
+                    closed = self._manage(open_pos, sym, bar, ts, res, squared_off, i,
+                                          atr_by_sym.get(sym))
+                    if closed:
                         day_pnl += closed
 
                 # 2. then look for an entry
@@ -353,10 +383,17 @@ class Backtester:
         entry = self._fill(price, side, entering=True)
         t = BTTrade(symbol=sym, side=side, qty=qty, entry_ts=ts, entry=entry,
                     sl=round(sl, 2), target=round(target, 2))
+        # 1R is anchored to the structural stop, before any trailing moves it.
+        t.initial_sl = t.sl
         open_pos[sym] = t
         res.trades.append(t)
 
-    def _manage(self, open_pos, sym, bar, ts, res: Result, squared_off: bool) -> float | None:
+    def _manage(self, open_pos, sym, bar, ts, res: Result, squared_off: bool,
+                bar_idx: int, atr_series=None) -> float:
+        """Advance one open position by one bar.
+
+        Returns the net P&L realised this bar -- a partial booking and a final exit on the
+        same bar both count, so 0.0 means "still open, nothing realised"."""
         t = open_pos[sym]
         lo, hi = float(bar["Low"]), float(bar["High"])
         d = 1 if t.side == "BUY" else -1
@@ -376,9 +413,46 @@ class Backtester:
                 exit_price, reason = t.target, "target"
         if exit_price is None and squared_off:
             exit_price, reason = float(bar["Close"]), "squareoff"
-        if exit_price is None:
-            return None
-        return self._close(open_pos, sym, exit_price, ts, reason, res)
+
+        if exit_price is not None:
+            return self._close(open_pos, sym, exit_price, ts, reason, res)
+
+        # No exit on this bar -- advance the trail on this bar's CLOSE for the next bar.
+        # After the exit tests, so bar i is only ever tested against a stop derived from
+        # bars strictly before i. No look-ahead.
+        realised = 0.0
+        if self.trail_config.enabled and atr_series is not None:
+            a = atr_series.iloc[bar_idx] if bar_idx < len(atr_series) else 0.0
+            a = 0.0 if a != a else float(a)  # NaN -> no chandelier; breakeven floor still holds
+            new_sl, t.trail, partial_qty = update_exit(
+                t.entry, t.side, t.sl, float(bar["Close"]), a, t.trail,
+                qty=t.qty, risk_per_share=abs(t.entry - (t.initial_sl or t.sl)),
+                config=self.trail_config,
+            )
+            t.sl = new_sl
+            if partial_qty > 0:
+                realised += self._book_partial(t, partial_qty, float(bar["Close"]), ts, res)
+        return realised
+
+    def _book_partial(self, t: BTTrade, partial_qty: int, price: float, ts, res: Result) -> float:
+        """Realise part of a position as its own closed trade.
+
+        A separate BTTrade (rather than mutating the parent's average) keeps one entry/exit
+        per record, which is what the metrics iterate -- and it prices the extra sell leg's
+        charges properly instead of understating them.
+        """
+        part = BTTrade(symbol=t.symbol, side=t.side, qty=partial_qty,
+                       entry_ts=t.entry_ts, entry=t.entry, sl=t.sl, target=t.target,
+                       initial_sl=t.initial_sl)
+        part.exit = self._fill(price, t.side, entering=False)
+        part.exit_ts = ts
+        part.reason = "partial"
+        d = 1 if t.side == "BUY" else -1
+        part.gross = d * (part.exit - part.entry) * part.qty
+        part.charges = self.charges_for(part.entry, part.exit, part.qty)
+        res.trades.append(part)
+        t.qty -= partial_qty
+        return part.net
 
     def _close(self, open_pos, sym, price, ts, reason, res: Result) -> float:
         t = open_pos.pop(sym)
@@ -393,12 +467,36 @@ class Backtester:
 
 # --- metrics -------------------------------------------------------------
 
-def metrics(res: Result) -> dict:
+def metrics(res: Result, *, per_position: bool = False) -> dict:
     ts = res.closed
-    n = len(ts)
-    if n == 0:
-        return {"n": 0, "label": res.label}
-    nets = [t.net for t in ts]
+    n_raw = len(ts)
+    if n_raw == 0:
+        return {"n": 0, "label": res.label, "pos_n": 0}
+
+    # Aggregate positions by (symbol, entry_ts) to prevent partial bookings
+    # from artificially inflating sample size n and narrowing the 95% CI.
+    pos_groups: dict[tuple[str, object], list[BTTrade]] = {}
+    for t in ts:
+        key = (t.symbol, t.entry_ts)
+        pos_groups.setdefault(key, []).append(t)
+
+    pos_nets = [sum(t.net for t in group) for group in pos_groups.values()]
+    pos_n = len(pos_nets)
+    pos_mean = sum(pos_nets) / pos_n if pos_n else 0.0
+    pos_var = sum((x - pos_mean) ** 2 for x in pos_nets) / (pos_n - 1) if pos_n > 1 else 0.0
+    pos_sd = math.sqrt(pos_var)
+    pos_se = pos_sd / math.sqrt(pos_n) if pos_n else 0.0
+    pos_ci = 1.96 * pos_se
+    pos_wins = [x for x in pos_nets if x > 0]
+    pos_win_rate = len(pos_wins) / pos_n if pos_n else 0.0
+
+    if per_position:
+        nets = pos_nets
+        n = pos_n
+    else:
+        nets = [t.net for t in ts]
+        n = n_raw
+
     wins = [x for x in nets if x > 0]
     losses = [x for x in nets if x <= 0]
     total = sum(nets)
@@ -434,6 +532,13 @@ def metrics(res: Result) -> dict:
         "cost_drag": charges / gross_profit if gross_profit else float("inf"),
         "days": len({t.date for t in ts}),
         "trades_per_day": n / max(1, len({t.date for t in ts})),
+        # Per-position metrics
+        "pos_n": pos_n,
+        "pos_expectancy": pos_mean,
+        "pos_ci95": pos_ci,
+        "pos_lo": pos_mean - pos_ci,
+        "pos_hi": pos_mean + pos_ci,
+        "pos_win_rate": pos_win_rate,
     }
 
 
@@ -441,8 +546,8 @@ def _fmt_money(x: float) -> str:
     return f"{x:>10,.2f}"
 
 
-def report(res: Result, verbose: bool = False) -> str:
-    m = metrics(res)
+def report(res: Result, verbose: bool = False, *, per_position: bool = False) -> str:
+    m = metrics(res, per_position=per_position)
     if m["n"] == 0:
         return f"{res.label}: no trades over {res.bars} bars · rejections={res.rejections}"
 
@@ -461,6 +566,11 @@ def report(res: Result, verbose: bool = False) -> str:
         f"  (95% CI {m['lo']:+.2f} .. {m['hi']:+.2f})",
         f"  verdict       {verdict}",
     ]
+    if m.get("pos_n") and m["pos_n"] != m["n"]:
+        lines.append(
+            f"  per-position  {m['pos_n']} positions · expectancy {_fmt_money(m['pos_expectancy'])} +/- {m['pos_ci95']:.2f}"
+            f"  (95% CI {m['pos_lo']:+.2f} .. {m['pos_hi']:+.2f})"
+        )
     if res.rejections:
         lines.append(f"  skipped       {dict(sorted(res.rejections.items()))}")
 
@@ -510,6 +620,9 @@ def params(**overrides):
 
 def build_strategy(key: str) -> dict:
     """Rebuild a strategy spec so it picks up any patched params."""
+    if key == "orb_ma200":
+        from trading.backtest_orb import build_orb_strategy
+        return build_orb_strategy()
     if key not in strat_mod.STRATEGIES:
         raise SystemExit(f"unknown strategy {key!r} — choose from {list(strat_mod.STRATEGIES)}")
     spec = dict(strat_mod.STRATEGIES[key])

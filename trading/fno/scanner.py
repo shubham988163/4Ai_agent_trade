@@ -183,18 +183,31 @@ class Scanner:
         return cand
 
     @staticmethod
-    def _spark(df, day, limit: int = 24) -> list[dict]:
-        """Today's closed bars with the running VWAP, for the session sparkline."""
+    def _spark(df, day, limit: int = 75) -> list[dict]:
+        """Today's closed bars with running VWAP, EMA9, EMA21, OHLC, and Volume for candlestick chart."""
+        import pandas as pd
         day_df = ind.session_of(df, day)
         if day_df.empty:
             return []
         vw = ind.vwap(day_df)
+        e9 = ind.ema(df["Close"], 9)
+        e21 = ind.ema(df["Close"], 21)
         rows = []
         for ts, bar in day_df.tail(limit).iterrows():
-            rows.append({"t": ts.strftime("%H:%M"),
-                         "c": round(float(bar["Close"]), 2),
-                         "w": round(float(vw.loc[ts]), 2),
-                         "v": float(bar["Volume"])})
+            e9_val = round(float(e9.loc[ts]), 2) if ts in e9.index and pd.notna(e9.loc[ts]) else None
+            e21_val = round(float(e21.loc[ts]), 2) if ts in e21.index and pd.notna(e21.loc[ts]) else None
+            w_val = round(float(vw.loc[ts]), 2) if ts in vw.index and pd.notna(vw.loc[ts]) else round(float(bar["Close"]), 2)
+            rows.append({
+                "t": ts.strftime("%H:%M"),
+                "o": round(float(bar["Open"]), 2),
+                "h": round(float(bar["High"]), 2),
+                "l": round(float(bar["Low"]), 2),
+                "c": round(float(bar["Close"]), 2),
+                "v": float(bar["Volume"]) if "Volume" in bar else 0.0,
+                "w": w_val,
+                "e9": e9_val,
+                "e21": e21_val,
+            })
         return rows
 
     # --- orchestration --------------------------------------------------

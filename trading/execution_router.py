@@ -14,10 +14,13 @@ from zoneinfo import ZoneInfo
 
 from trading.config import (
     DAILY_LOSS_LIMIT,
+    DAILY_PROFIT_TARGET,
     MAX_POSITION_VALUE,
     MAX_OPEN_POSITIONS,
     MAX_ORDERS_PER_SEC,
     SLIPPAGE_PCT,
+    CHARGES_PCT_ROUND_TRIP,
+    MAX_COST_RISK_RATIO,
     TODAY_CONFIG_PATH,
     FALLBACK_DAY_CONFIG,
 )
@@ -98,8 +101,48 @@ class ExecutionRouter:
         if self.day_config["risk_multiplier"] <= 0:
             return "risk_multiplier_zero (pre-market halt)"
 
-        if self.ledger.day_realized_pnl() <= DAILY_LOSS_LIMIT:
+        # 1. Structural stop check (no fallback)
+        stop_loss = signal.get("stop_loss")
+        if stop_loss is None or stop_loss <= 0:
+            return "missing_stop_loss (trade rejected: structural stop required)"
+
+        price = float(signal.get("price", 0.0))
+        side = signal.get("side")
+
+        if side == "BUY" and stop_loss >= price:
+            return f"invalid_stop_loss (BUY stop_loss {stop_loss:.2f} must be below entry price {price:.2f})"
+        if side == "SELL" and stop_loss <= price:
+            return f"invalid_stop_loss (SELL stop_loss {stop_loss:.2f} must be above entry price {price:.2f})"
+
+        per_share_risk = abs(price - stop_loss)
+        if per_share_risk <= 0.05:
+            return "invalid_stop_loss (stop loss too close to entry price)"
+
+        # 2. Cost-floor check: round-trip friction cannot exceed MAX_COST_RISK_RATIO of risk (shared helper)
+        from trading.costs import check_cost_floor
+        passed, cost_ratio = check_cost_floor(price, stop_loss, qty=int(signal.get("qty", 1)))
+        if not passed:
+            return (f"cost_floor_breached (round-trip friction {cost_ratio*100:.1f}% of risk "
+                    f"exceeds limit {MAX_COST_RISK_RATIO*100:.1f}%)")
+
+        # 3. Trend gate check (router hard risk kernel — restricted to orb_ma200 strategies)
+        strat_id = str(signal.get("strategy_id", ""))
+        if strat_id.startswith("orb_ma200"):
+            trend_state = signal.get("trend_state")
+            if trend_state not in ("up", "down"):
+                return f"trend_gate_failed (trend state '{trend_state}' is not permitted)"
+            if side == "BUY" and trend_state != "up":
+                return f"trend_gate_failed (BUY requires trend_state 'up', got '{trend_state}')"
+            if side == "SELL" and trend_state != "down":
+                return f"trend_gate_failed (SELL requires trend_state 'down', got '{trend_state}')"
+
+        day_pnl = self.ledger.day_realized_pnl()
+
+        if day_pnl <= DAILY_LOSS_LIMIT:
             return "daily_loss_limit_hit"
+
+        if day_pnl >= DAILY_PROFIT_TARGET:
+            return "daily_profit_target_hit (locking in gains for the day)"
 
         today = datetime.now(IST).strftime("%Y-%m-%d")
         open_positions = [t for t in self.ledger.open_trades() if t.get("date") == today]
@@ -108,10 +151,6 @@ class ExecutionRouter:
             return f"max_open_positions ({len(open_positions)}/{MAX_OPEN_POSITIONS})"
 
         position_value = signal["qty"] * signal["price"]
-        # Hard capital cap, never scaled: with a small account, scaling the
-        # cap priced out every symbol on cautious days. The agent's risk
-        # multiplier instead scales RISK_PER_TRADE in the engine's sizing
-        # (and 0 still halts, above) — it can shrink size, never grow it.
         existing = self.ledger.open_position_value(signal["symbol"])
         if existing + position_value > MAX_POSITION_VALUE:
             return f"max_position_value (cap={MAX_POSITION_VALUE:.0f}, would_be={existing + position_value:.0f})"
@@ -151,6 +190,26 @@ class ExecutionRouter:
         )
 
     def simulate_fill(self, signal: dict) -> float:
-        ltp = self.get_ltp(signal["symbol"]) if self.get_ltp else signal["price"]
+        ltp = None
+        if self.get_ltp:
+            try:
+                ltp = self.get_ltp(signal["symbol"])
+            except Exception:
+                pass
+        if not ltp or ltp <= 0:
+            try:
+                from trading.fno.fyers import FyersClient
+                fyers = FyersClient()
+                sym = signal["symbol"]
+                fyers_sym = f"NSE:{sym}-EQ" if not sym.startswith("NSE:") else sym
+                q = fyers.quotes([fyers_sym])
+                if q and len(q) > 0 and "v" in q[0] and "lp" in q[0]["v"]:
+                    ltp = float(q[0]["v"]["lp"])
+            except Exception:
+                pass
+        if not ltp or ltp <= 0:
+            ltp = signal["price"]
+
         slip = SLIPPAGE_PCT * ltp
         return ltp + slip if signal["side"] == "BUY" else ltp - slip
+

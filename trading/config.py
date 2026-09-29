@@ -2,9 +2,13 @@
 
 All paths are anchored to the project root so cron jobs work regardless of CWD.
 """
+import os
 from pathlib import Path
+from dotenv import load_dotenv
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+load_dotenv(PROJECT_ROOT / ".env")
+
 
 # --- Trading universe ---
 # Core watchlist (used by the pre-market agent's prompt focus).
@@ -48,57 +52,70 @@ REPORTS_DIR = PROJECT_ROOT / "reports"
 LOGS_DIR = PROJECT_ROOT / "logs"
 
 # --- Fyers API v3 (Real-time live market feed) ---
-FYERS_APP_ID = "J8ZMHWBTBW-100"
-FYERS_SECRET_ID = "KLFH4NCSIV"
-FYERS_REDIRECT_URI = "http://localhost:3001/api/fyers/callback"
+FYERS_APP_ID = os.getenv("FYERS_APP_ID", "J8ZMHWBTBW-100")
+FYERS_SECRET_ID = os.getenv("FYERS_SECRET_ID", "")
+FYERS_REDIRECT_URI = os.getenv("FYERS_REDIRECT_URI", "http://localhost:3001/api/fyers/callback")
 
 # --- Strategy: EMA crossover ---
 FAST_EMA = 9
 SLOW_EMA = 21
-# 15m: the only net-positive config in the Jun-30→Jul-13 backtest
-# (+145 net / +1083 gross over 10 sessions; every 5m variant lost after
-# charges — 5m moves are too small to clear ~0.16% round-trip friction).
 CANDLE_INTERVAL = "15m"
-SWING_LOOKBACK = 10             # bars used to find the swing low/high for the stop
-RR_TARGET = 2.0                 # target = entry +/- 2x risk (1:2)
-# Account sizing (2026-07-30): capital raised to 10,00,000 INR ("1000k").
-# Risk 0.5% per trade — standard prudent intraday sizing at this scale.
-ACCOUNT_CAPITAL = 1_000_000.0
-RISK_PER_TRADE = 5_000.0        # INR risked per trade (0.5%) -> sizes the position
-POLL_SECONDS = 60               # live-loop poll interval (delayed data)
-SQUAREOFF_TIME = "15:15"        # IST intraday square-off
+SWING_LOOKBACK = 10
+RR_TARGET = 2.0
+# Account sizing: capital set to 15,000 INR.
+ACCOUNT_CAPITAL = 15_000.0
+RISK_PER_TRADE = 75.0           # INR risked per trade (0.5% of capital)
+POLL_SECONDS = 60
+SQUAREOFF_TIME = "15:15"
 MARKET_OPEN = "09:15"
 MARKET_CLOSE = "15:30"
 
-# --- Strategy: AVWAP scalp (python port of tradingview/avwap_scalp.pine) ---
-AVWAP_RR = 1.5                  # target = entry +/- 1.5x risk
-AVWAP_ATR_MULT = 0.5            # stop = candle extreme +/- 0.5x ATR(14)
+# --- Strategy: AVWAP scalp ---
+AVWAP_RR = 1.5
+AVWAP_ATR_MULT = 0.5
 AVWAP_RSI_LEN = 14
-AVWAP_EMA_LEN = 20              # trend filter
-AVWAP_VOL_MULT = 1.2            # volume surge threshold vs 20-bar average
+AVWAP_EMA_LEN = 20
+AVWAP_VOL_MULT = 1.2
 
 # --- Risk kernel (hard limits — the AI agent can NEVER override these) ---
-# Scaled to ACCOUNT_CAPITAL = 10,00,000 INR:
-DAILY_LOSS_LIMIT = -10_000.0    # INR; hard stop for the day (1% of capital)
-MAX_POSITION_VALUE = 200_000.0  # INR per position (20% of capital)
+# Scaled to ACCOUNT_CAPITAL = 15,000 INR:
+DAILY_LOSS_LIMIT = -500.0       # INR; hard stop for the day (~3.3% of capital)
+DAILY_PROFIT_TARGET = 1_000.0   # INR; stop opening new trades once hit for the day
+MAX_POSITION_VALUE = 3_000.0    # INR per position (20% of capital)
 MAX_OPEN_POSITIONS = 5          # portfolio cap (max 100% of capital deployed)
-MAX_ORDERS_PER_SEC = 8          # SEBI 10-OPS threshold with buffer
+MAX_ORDERS_PER_SEC = 8
 
 # --- Fill simulation (paper mode) ---
 SLIPPAGE_PCT = 0.0005           # 0.05% assumed slippage
 # Rough intraday cost model per round trip (brokerage + STT + charges).
 # Verify against Zerodha's brokerage calculator — STT rates changed in 2026.
 CHARGES_PCT_ROUND_TRIP = 0.0006
+MAX_COST_RISK_RATIO = 0.30      # Max friction as a fraction of risk (30%)
+
+# --- Exit management: deterministic trailing stop ---
+# Default OFF: trailing changes exit behaviour everywhere it is wired in (shadow
+# resolution, research harness, backtest engine, live paper loop), so it stays opt-in
+# until the harness shows what it does to expectancy. See trading/exits.py.
+TRAIL_ENABLED = False
+BREAKEVEN_AT_R = 1.0            # favourable excursion (in R) that moves the stop to breakeven
+TRAIL_ATR_MULT = 2.0            # chandelier trail distance in ATR(14) units
+PARTIAL_AT_R = 1.5              # R multiple that triggers partial booking (None disables)
+PARTIAL_PCT = 0.5               # fraction of the position booked at the partial
 
 # --- AI agent ---
 # Provider is auto-selected in trading/agents/llm.py: Gemini when
 # GEMINI_API_KEY is set, Anthropic otherwise (override with LLM_PROVIDER).
 ANTHROPIC_MODEL = "claude-opus-4-8"
-# gemini-2.5-flash works on the free tier; switch to gemini-2.5-pro (or a
-# gemini-3 model) once billing is enabled on the Google AI Studio project.
-GEMINI_MODEL = "gemini-2.5-flash"
+# Google Gemini: gemini-3.5-flash-lite is fast, reliable and cost-effective on Google AI Studio
+GEMINI_MODEL = "gemini-3.5-flash-lite"
+GEMINI_FALLBACK_MODEL = "gemini-3.6-flash"
 AGENT_MAX_TOKENS = 16000
 SUPERVISOR_POLL_SECONDS = 5     # how often the async supervisor checks for new trades
+
+# Multi-Agent stock evaluator parameters
+AGENT_MIN_CONVICTION = 7        # Conviction score out of 10 required to execute a trade
+AGENT_MAX_TRADES_PER_SCAN = 3   # Max new trades to execute in a single scan pass
+
 
 # Safe defaults used whenever the pre-market agent fails or returns invalid output
 FALLBACK_DAY_CONFIG = {

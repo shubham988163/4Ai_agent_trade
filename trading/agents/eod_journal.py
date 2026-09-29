@@ -56,6 +56,14 @@ def _avg(values):
 def run(date: str | None = None) -> str | None:
     date = date or datetime.now().strftime("%Y-%m-%d")
     ledger = Ledger()
+    try:
+        from trading.shadow import resolve_open_shadow_candidates
+        resolved = resolve_open_shadow_candidates(ledger)
+        if resolved:
+            print(f"[eod_journal] Resolved {len(resolved)} shadow candidate exits")
+    except Exception as exc:
+        print(f"[eod_journal] Shadow candidate resolution warning: {exc}")
+
     trades = ledger.trades_for_date(date)
 
     if not trades:

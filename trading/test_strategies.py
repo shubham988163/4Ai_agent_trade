@@ -11,7 +11,8 @@ Run with:
 from __future__ import annotations
 
 import sys
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -180,8 +181,62 @@ def test_render():
     check("chain report survives a missing chain", "no chain" in ca.render(None))
 
 
+def test_orb_ma200():
+    print("orb ma200 strategy")
+    from trading.strategies.orb_ma200 import ORBMA200Strategy
+    import numpy as np
+
+    ist = ZoneInfo("Asia/Kolkata")
+    base_dates = []
+    curr_date = datetime(2026, 8, 10, 9, 15, tzinfo=ist)
+    while len(base_dates) < 2500:
+        if curr_date.weekday() < 5:
+            if "09:15" <= curr_date.strftime("%H:%M") <= "15:25":
+                base_dates.append(curr_date)
+        curr_date += timedelta(minutes=5)
+
+    n_bars = len(base_dates)
+    prices = np.linspace(100.0, 200.0, n_bars)
+    df = pd.DataFrame({
+        "Open": prices,
+        "High": prices + 0.5,
+        "Low": prices - 0.5,
+        "Close": prices,
+        "Volume": 1000.0,
+    }, index=pd.DatetimeIndex(base_dates))
+
+    last_day_date = df.index[-1].date()
+    day_mask = df.index.date == last_day_date
+    day_indices = np.where(day_mask)[0]
+
+    # Structure Opening Range
+    or_idx = day_indices[:3]
+    df.iloc[or_idx, df.columns.get_loc("Open")] = 200.0
+    df.iloc[or_idx, df.columns.get_loc("High")] = 201.0
+    df.iloc[or_idx, df.columns.get_loc("Low")] = 199.5
+    df.iloc[or_idx, df.columns.get_loc("Close")] = 200.2
+    df.iloc[or_idx, df.columns.get_loc("Volume")] = 1000.0
+
+    # Breakout bar
+    breakout_idx = day_indices[3]
+    df.iloc[breakout_idx, df.columns.get_loc("Open")] = 200.8
+    df.iloc[breakout_idx, df.columns.get_loc("High")] = 202.2
+    df.iloc[breakout_idx, df.columns.get_loc("Low")] = 201.2
+    df.iloc[breakout_idx, df.columns.get_loc("Close")] = 202.0
+    df.iloc[breakout_idx, df.columns.get_loc("Volume")] = 5000.0
+
+    eval_df = df.iloc[: breakout_idx + 1]
+    strat = ORBMA200Strategy()
+    sig = strat.evaluate(eval_df, "INFY")
+    check("ORB MA 200 generates breakout buy signal", sig is not None and sig.side == "BUY")
+    if sig:
+        check("signal has correct symbol", sig.symbol == "INFY")
+        check("signal has strategy_id orb_ma200", sig.strategy_id == "orb_ma200")
+        check("signal has stop_loss and target", sig.stop_loss < sig.price < sig.target)
+
+
 def main() -> int:
-    for fn in (test_pcr_and_walls, test_max_pain, test_pivots, test_gap, test_render):
+    for fn in (test_pcr_and_walls, test_max_pain, test_pivots, test_gap, test_render, test_orb_ma200):
         fn()
     print()
     if FAILURES:
@@ -195,3 +250,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+

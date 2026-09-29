@@ -32,7 +32,8 @@ def main():
     signal = {"symbol": "RELIANCE", "side": "BUY", "qty": 5,
               "price": get_ltp("RELIANCE"), "ts": time.time(),
               "stop_loss": 2935.0, "target": 2975.0,
-              "strategy_id": "ema_x_v3", "regime": router.day_config["regime"]}
+              "strategy_id": "ema_x_v3", "regime": router.day_config["regime"],
+              "trend_state": "up"}
     trade_id = router.execute(signal)
     print(f"signal 1 (RELIANCE BUY x5): trade_id={trade_id}")
 

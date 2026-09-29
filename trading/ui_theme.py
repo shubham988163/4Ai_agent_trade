@@ -202,6 +202,22 @@ tbody tr:hover td{background:var(--cell)}
 .ctxp .cav{padding:8px 12px;font-size:10.5px;color:var(--ink-3);
   border-top:1px solid var(--line)}
 
+/* ---------- 4 AI Agents Council styles ---------- */
+.agent-card{background:var(--cell);border:1px solid var(--line);border-radius:10px;padding:14px;transition:all .2s ease;display:flex;flex-direction:column;gap:10px;box-shadow:var(--shadow)}
+.agent-card:hover{border-color:var(--line-2);transform:translateY(-2px)}
+.agent-header{display:flex;align-items:center;gap:10px}
+.agent-avatar{width:34px;height:34px;border-radius:9px;display:grid;place-items:center;font-size:17px;flex:none}
+.agent-tech .agent-avatar{background:linear-gradient(135deg,#0284c7,#38bdf8);box-shadow:0 0 10px rgba(56,189,248,.3)}
+.agent-bull .agent-avatar{background:linear-gradient(135deg,#059669,#34d399);box-shadow:0 0 10px rgba(52,211,153,.3)}
+.agent-bear .agent-avatar{background:linear-gradient(135deg,#e11d48,#fb7185);box-shadow:0 0 10px rgba(251,113,133,.3)}
+.agent-trader .agent-avatar{background:linear-gradient(135deg,#d97706,#fbbf24);box-shadow:0 0 10px rgba(251,191,36,.3)}
+.agent-name{font-weight:700;font-size:13px;color:var(--ink);letter-spacing:.02em}
+.agent-role{font-size:10.5px;color:var(--ink-3);letter-spacing:.04em;text-transform:uppercase}
+.agent-status-pill{margin-left:auto;font-size:10px;font-weight:600;padding:2px 7px;border-radius:999px;display:inline-flex;align-items:center;gap:4px}
+.agent-body{background:var(--card);border:1px solid var(--line);border-radius:7px;padding:10px;font-size:12px;color:var(--ink-2);line-height:1.55;min-height:90px;flex:1}
+.conviction-meter{background:var(--track);height:8px;border-radius:999px;overflow:hidden;margin:6px 0;position:relative}
+.conviction-fill{height:100%;border-radius:999px;transition:width .4s ease}
+
 /* ---------- banner + footer ---------- */
 .banner{margin-top:14px;border:1px solid var(--bad);background:var(--bad-soft);
   border-radius:10px;padding:11px 14px;font-size:12.5px;color:var(--ink)}
@@ -227,6 +243,7 @@ def topbar(title: str, active: str, right: str = "", subtitle_id: str = "win") -
     </div>
     <nav class="nav">
       <a href="/"{cur("dashboard")}>Dashboard</a>
+      <a href="/#agents-desk" style="border-left:1px solid var(--line);color:var(--accent);font-weight:700">🤖 4 Agents Desk</a>
       <a href="/fno"{cur("scanner")}>Scanner</a>
     </nav>
     <div class="spacer"></div>

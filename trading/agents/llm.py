@@ -20,8 +20,9 @@ from typing import TypeVar
 
 from pydantic import BaseModel
 
-from trading.config import ANTHROPIC_MODEL, GEMINI_MODEL, AGENT_MAX_TOKENS
+from trading.config import ANTHROPIC_MODEL, GEMINI_MODEL, GEMINI_FALLBACK_MODEL, AGENT_MAX_TOKENS
 from trading.ledger import Ledger
+
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -106,21 +107,31 @@ def _call_anthropic_structured(system: str, prompt: str, output_model: type[T]) 
 
 def _call_gemini_structured(system: str, prompt: str, output_model: type[T]) -> T | None:
     from google.genai import types
-    response = _gemini().models.generate_content(
-        model=GEMINI_MODEL,
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            system_instruction=system,
-            response_mime_type="application/json",
-            response_schema=output_model,
-            max_output_tokens=AGENT_MAX_TOKENS,
-        ),
-    )
-    parsed = response.parsed
-    if parsed is None and response.text:
-        # SDK didn't auto-parse; validate the JSON text ourselves.
-        parsed = output_model.model_validate_json(response.text)
-    return parsed
+    last_err = None
+    for model_name in (GEMINI_MODEL, GEMINI_FALLBACK_MODEL):
+        try:
+            response = _gemini().models.generate_content(
+                model=model_name,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    system_instruction=system,
+                    response_mime_type="application/json",
+                    response_schema=output_model,
+                    max_output_tokens=AGENT_MAX_TOKENS,
+                ),
+            )
+            parsed = response.parsed
+            if parsed is None and response.text:
+                # SDK didn't auto-parse; validate the JSON text ourselves.
+                parsed = output_model.model_validate_json(response.text)
+            if parsed is not None:
+                return parsed
+        except Exception as err:
+            last_err = err
+            continue
+    if last_err is not None:
+        raise last_err
+    return None
 
 
 # --- free-form text calls (EOD journal) ---
@@ -165,12 +176,23 @@ def _call_anthropic_text(system: str, prompt: str) -> str | None:
 
 def _call_gemini_text(system: str, prompt: str) -> str | None:
     from google.genai import types
-    response = _gemini().models.generate_content(
-        model=GEMINI_MODEL,
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            system_instruction=system,
-            max_output_tokens=AGENT_MAX_TOKENS,
-        ),
-    )
-    return response.text
+    last_err = None
+    for model_name in (GEMINI_MODEL, GEMINI_FALLBACK_MODEL):
+        try:
+            response = _gemini().models.generate_content(
+                model=model_name,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    system_instruction=system,
+                    max_output_tokens=AGENT_MAX_TOKENS,
+                ),
+            )
+            if response.text:
+                return response.text
+        except Exception as err:
+            last_err = err
+            continue
+    if last_err is not None:
+        raise last_err
+    return None
+

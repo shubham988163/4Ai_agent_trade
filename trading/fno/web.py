@@ -228,6 +228,29 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(404, "text/plain", b"not found")
         self._send(*result)
 
+    def do_POST(self):  # noqa: N802
+        url = urlparse(self.path)
+        length = int(self.headers.get("Content-Length", 0))
+        try:
+            body = json.loads(self.rfile.read(length)) if length > 0 else {}
+        except Exception:
+            body = {}
+
+        if url.path == "/api/trade":
+            from trading.dashboard import _handle_trade
+            res = _handle_trade(body)
+            self._send(200 if res.get("ok") else 400, "application/json", json.dumps(res).encode())
+        elif url.path == "/api/close":
+            from trading.dashboard import _handle_close
+            res = _handle_close(body)
+            self._send(200 if res.get("ok") else 400, "application/json", json.dumps(res).encode())
+        elif url.path == "/api/ai-scan":
+            from trading.dashboard import _handle_ai_scan
+            res = _handle_ai_scan(body)
+            self._send(200 if res.get("ok") else 400, "application/json", json.dumps(res).encode())
+        else:
+            self._send(404, "text/plain", b"not found")
+
     def _send(self, code: int, ctype: str, body: bytes):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
@@ -312,14 +335,27 @@ __THEME__
 .meter .t{height:5px;border-radius:999px;background:var(--track);margin-top:4px;overflow:hidden}
 .meter .f{height:100%;border-radius:999px;background:var(--accent)}
 
-/* ---------- charts row ---------- */
-.charts{display:grid;grid-template-columns:minmax(0,300px) minmax(0,1fr);gap:16px;
-  padding:13px 14px 4px 16px;align-items:center}
-@media (max-width:760px){.charts{grid-template-columns:1fr}}
-.spark{position:relative}
-.spark svg{display:block;width:100%;height:58px}
-.spark .end{position:absolute;width:7px;height:7px;border-radius:50%;background:var(--accent);
-  box-shadow:0 0 0 2px var(--card);transform:translate(-50%,-50%)}
+/* ---------- Candlestick & Strategy Chart ---------- */
+.chart-container{padding:12px 16px 6px 16px;display:flex;flex-direction:column;gap:10px}
+.candle-card{position:relative;background:var(--cell);border:1px solid var(--line);border-radius:10px;padding:12px 14px;overflow:hidden;box-shadow:inset 0 1px 4px rgba(0,0,0,0.3)}
+.candle-hud{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;padding-bottom:8px;border-bottom:1px solid var(--line);font-size:11px}
+.candle-hud-title{display:flex;align-items:center;gap:6px;font-weight:700;color:var(--ink);letter-spacing:.04em;text-transform:uppercase;font-size:11px}
+.candle-hud-vals{display:flex;align-items:center;gap:8px 12px;flex-wrap:wrap;color:var(--ink-2);font-family:ui-monospace,monospace;font-size:11px}
+.candle-hud-vals span{display:inline-flex;align-items:baseline;gap:3px}
+.candle-hud-vals b{color:var(--ink);font-weight:650}
+.candle-hud-vals b.up{color:var(--good)}
+.candle-hud-vals b.down{color:var(--bad)}
+.candle-legend{display:flex;align-items:center;gap:10px 16px;flex-wrap:wrap;padding:7px 0 3px 0;font-size:10.5px;color:var(--ink-2);border-top:1px solid rgba(255,255,255,0.04);margin-top:6px}
+.candle-legend-item{display:inline-flex;align-items:center;gap:5px;white-space:nowrap}
+.candle-legend-dot{width:8px;height:8px;border-radius:2px;display:inline-block}
+.candle-legend-line{width:14px;height:0;border-top:2px solid;display:inline-block;vertical-align:middle}
+.candle-legend-dashed{border-top-style:dashed}
+.candle-svg-wrap{position:relative;width:100%;user-select:none}
+.candle-svg-wrap svg{display:block;width:100%;height:220px;cursor:crosshair}
+.candle-crosshair{pointer-events:none}
+
+.ladder-section{padding:9px 12px 11px 12px;background:var(--cell);border:1px solid var(--line);border-radius:9px}
+.ladder-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:4px}
 .cap{font-size:9.5px;letter-spacing:.10em;text-transform:uppercase;color:var(--ink-3);
   margin-bottom:5px}
 
@@ -430,6 +466,61 @@ td.blk{white-space:normal;min-width:220px}
 .empty{padding:16px;color:var(--ink-3);font-size:12.5px;text-align:center}
 .foot{margin-top:18px;padding-top:12px;border-top:1px solid var(--line);
   font-size:11px;color:var(--ink-3);line-height:1.6}
+
+/* ---------- AI Multi-Agent Intelligence Desk ---------- */
+.agent-desk{margin-top:14px;background:linear-gradient(180deg,var(--card) 0%,rgba(14,23,40,0.85) 100%);
+  border:1px solid var(--line-2);border-radius:12px;overflow:hidden;box-shadow:var(--shadow)}
+.agent-desk-hdr{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;
+  background:var(--cell);border-bottom:1px solid var(--line);flex-wrap:wrap;gap:10px}
+.agent-desk-title{display:flex;align-items:center;gap:10px;font-size:13.5px;font-weight:700;
+  letter-spacing:0.04em;color:var(--ink)}
+.agent-pulse{width:9px;height:9px;border-radius:50%;background:var(--good);
+  box-shadow:0 0 10px var(--good);display:inline-block;animation:pulse-dot 2s infinite ease-in-out}
+@keyframes pulse-dot{0%,100%{opacity:1;transform:scale(1)} 50%{opacity:0.4;transform:scale(0.85)}}
+.agent-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;padding:14px 16px}
+@media (max-width:980px){.agent-grid{grid-template-columns:repeat(2,1fr)}}
+@media (max-width:580px){.agent-grid{grid-template-columns:1fr}}
+.agent-card{background:var(--cell);border:1px solid var(--line);border-radius:10px;padding:12px;
+  display:flex;flex-direction:column;gap:8px;position:relative;transition:all .2s ease}
+.agent-card:hover{transform:translateY(-2px);border-color:var(--accent);box-shadow:0 6px 16px rgba(0,0,0,0.3)}
+.agent-card-hdr{display:flex;align-items:center;justify-content:space-between;gap:6px}
+.agent-badge{font-size:9.5px;padding:2px 7px;border-radius:4px;font-weight:700;
+  text-transform:uppercase;letter-spacing:0.05em}
+.agent-name{font-size:12px;font-weight:700;color:var(--ink);display:flex;align-items:center;gap:6px}
+.agent-model{font-size:10px;color:var(--ink-3);font-family:ui-monospace,monospace}
+.agent-desc{font-size:11.5px;color:var(--ink-2);line-height:1.45;flex-grow:1}
+.agent-tags{display:flex;flex-wrap:wrap;gap:4px;margin-top:4px}
+.agent-tag{font-size:9.5px;padding:2px 5px;border-radius:4px;background:var(--card);
+  border:1px solid var(--line);color:var(--ink-3);font-family:ui-monospace,monospace}
+
+.agent-console{padding:12px 16px;border-top:1px solid var(--line);background:rgba(14,23,40,0.45);
+  display:flex;flex-direction:column;gap:12px}
+.agent-bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.agent-input-wrap{display:flex;align-items:center;gap:6px;background:var(--cell);
+  border:1px solid var(--line);border-radius:8px;padding:4px 8px}
+.agent-input{background:transparent;border:none;color:var(--ink);font-size:13px;
+  font-weight:600;width:130px;outline:none;text-transform:uppercase;font-family:ui-monospace,monospace}
+.agent-chips{display:flex;align-items:center;gap:5px;flex-wrap:wrap}
+.agent-chip{padding:3px 8px;border-radius:6px;border:1px solid var(--line);background:var(--cell);
+  color:var(--ink-2);font-size:11px;font-weight:600;cursor:pointer;transition:all 0.15s ease;
+  font-family:ui-monospace,monospace}
+.agent-chip:hover{background:var(--cell-2);border-color:var(--accent);color:var(--ink)}
+
+.agent-debate-output{display:none;background:var(--cell);border:1px solid var(--line-2);
+  border-radius:10px;padding:14px;margin-top:6px;animation:fade-in 0.25s ease}
+@keyframes fade-in{from{opacity:0;transform:translateY(6px)} to{opacity:1;transform:translateY(0)}}
+.debate-verdict-hdr{display:flex;align-items:center;justify-content:space-between;
+  flex-wrap:wrap;gap:10px;padding-bottom:12px;border-bottom:1px solid var(--line)}
+.debate-scores{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px;margin:12px 0}
+.debate-stat{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:8px 10px}
+.debate-stat .lbl{font-size:10px;text-transform:uppercase;color:var(--ink-3);letter-spacing:0.05em}
+.debate-stat .val{font-size:15px;font-weight:700;font-family:ui-monospace,monospace;margin-top:2px}
+.debate-perspectives{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin-top:10px}
+@media (max-width:800px){.debate-perspectives{grid-template-columns:1fr}}
+.perspective-card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:11px 13px}
+.perspective-title{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.06em;
+  margin-bottom:6px;display:flex;align-items:center;gap:6px}
+.perspective-body{font-size:12px;color:var(--ink-2);line-height:1.55}
 </style></head>
 <body data-mode="__MODE__">
 <div class="wrap">
@@ -453,6 +544,139 @@ __TOPBAR__
   <div class="kpis" id="kpis"></div>
 
   <div id="niftyWrap"></div>
+
+  <!-- AI Multi-Agent Intelligence Desk -->
+  <section class="agent-desk" id="agentDeskPanel">
+    <div class="agent-desk-hdr">
+      <div>
+        <div class="agent-desk-title">
+          <span class="agent-pulse"></span>
+          <span>⚡ AI Multi-Agent Intelligence Desk</span>
+          <span class="agent-badge" style="background:var(--accent-soft);color:var(--accent);border:1px solid rgba(47,159,219,.3)">Live Consensus Engine</span>
+        </div>
+        <div style="font-size:11px;color:var(--ink-3);margin-top:3px">
+          Autonomous 4-Agent Debate Council powered by <strong>Google Gemini 3.5 Flash Lite</strong> + <strong>Fyers API v3 Tick Stream</strong>
+        </div>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px">
+        <span style="font-size:11px;color:var(--ink-2);font-family:ui-monospace,monospace">Status: <strong style="color:var(--good)">4 Agents Online</strong></span>
+        <button class="btn" id="btnToggleAgents" style="font-size:11px;padding:3px 9px" onclick="toggleAgentDesk()">Minimize Desk</button>
+      </div>
+    </div>
+
+    <div id="agentDeskBody">
+      <div class="agent-grid">
+        <!-- Agent 1 -->
+        <div class="agent-card">
+          <div class="agent-card-hdr">
+            <span class="agent-name">📊 Technical Analyst</span>
+            <span class="agent-badge" style="background:var(--good-soft);color:var(--good)">Active</span>
+          </div>
+          <div class="agent-model">Gemini 3.5 · ORB &amp; Trend Engine</div>
+          <div class="agent-desc">
+            Audits the 09:15-09:30 Opening Range (0.3%-1.5% gate), verifies the Dual Multi-Timeframe 200 SMA trend gate on 1H &amp; 30m, session VWAP slope, and volume surge.
+          </div>
+          <div class="agent-tags">
+            <span class="agent-tag">ORB 09:15-09:30</span>
+            <span class="agent-tag">1H/30m 200 SMA</span>
+            <span class="agent-tag">VWAP Slope</span>
+            <span class="agent-tag">Vol Spike ≥1.5x</span>
+          </div>
+        </div>
+
+        <!-- Agent 2 -->
+        <div class="agent-card">
+          <div class="agent-card-hdr">
+            <span class="agent-name">🐂 Bullish Researcher</span>
+            <span class="agent-badge" style="background:var(--good-soft);color:var(--good)">Active</span>
+          </div>
+          <div class="agent-model">Gemini 3.5 · ORB Long Specialist</div>
+          <div class="agent-desc">
+            Argues the Long breakout thesis ONLY when price is strictly above BOTH 1H &amp; 30m 200 SMAs, with fresh candle close above OR-High and volume expansion.
+          </div>
+          <div class="agent-tags">
+            <span class="agent-tag">Uptrend Gate (LTP > 200MA)</span>
+            <span class="agent-tag">OR-H Breakout</span>
+            <span class="agent-tag">Volume Surge ≥1.5x</span>
+          </div>
+        </div>
+
+        <!-- Agent 3 -->
+        <div class="agent-card">
+          <div class="agent-card-hdr">
+            <span class="agent-name">🐻 Bearish Researcher</span>
+            <span class="agent-badge" style="background:var(--bad-soft);color:var(--bad)">Auditing</span>
+          </div>
+          <div class="agent-model">Gemini 3.5 · False Breakout Auditor</div>
+          <div class="agent-desc">
+            Stress-tests setups for false breakout wicks, range disqualification (&lt;0.3% or &gt;1.5%), overhead 200 MAs, or short breakdown setups below OR-Low.
+          </div>
+          <div class="agent-tags">
+            <span class="agent-tag">Downtrend Gate (LTP < 200MA)</span>
+            <span class="agent-tag">OR-L Breakdown</span>
+            <span class="agent-tag">Range Trap Audit</span>
+          </div>
+        </div>
+
+        <!-- Agent 4 -->
+        <div class="agent-card">
+          <div class="agent-card-hdr">
+            <span class="agent-name">⚖️ Decision Desk Chair</span>
+            <span class="agent-badge" style="background:var(--accent-soft);color:var(--accent)">Supervisor</span>
+          </div>
+          <div class="agent-model">Gemini 3.5 · ORB + 200MA Kernel</div>
+          <div class="agent-desc">
+            Strictly enforces the 6 ORB + 200MA rules. Dispatches BUY/SELL orders with structural ATR stops and 2.0 R:R only if conviction ≥7/10; otherwise mandates HOLD.
+          </div>
+          <div class="agent-tags">
+            <span class="agent-tag">ORB Rulebook</span>
+            <span class="agent-tag">Structural ATR Stop</span>
+            <span class="agent-tag">2.0 R:R Target</span>
+            <span class="agent-tag">Conviction ≥ 7/10</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Interactive Debate Console -->
+      <div class="agent-console">
+        <div class="agent-bar">
+          <span style="font-size:11.5px;font-weight:700;color:var(--ink-2);text-transform:uppercase;letter-spacing:.05em">Summon AI Committee:</span>
+          <div class="agent-input-wrap">
+            <span style="color:var(--ink-3);font-size:11px">NSE:</span>
+            <input type="text" id="aiAgentSymInput" class="agent-input" placeholder="e.g. RELIANCE" value="SBIN" />
+          </div>
+          <div class="agent-chips" id="agentQuickChips">
+            <span class="agent-chip" onclick="setAiSymbol('RELIANCE')">RELIANCE</span>
+            <span class="agent-chip" onclick="setAiSymbol('SBIN')">SBIN</span>
+            <span class="agent-chip" onclick="setAiSymbol('HDFCBANK')">HDFCBANK</span>
+            <span class="agent-chip" onclick="setAiSymbol('ICICIBANK')">ICICIBANK</span>
+            <span class="agent-chip" onclick="setAiSymbol('INFY')">INFY</span>
+            <span class="agent-chip" onclick="setAiSymbol('TCS')">TCS</span>
+          </div>
+          <div style="margin-left:auto;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+            <label class="chk" style="font-size:11px;color:var(--ink-2);display:flex;align-items:center;gap:5px;cursor:pointer">
+              <input type="checkbox" id="chkAutoAiDebate" onchange="toggleAutoAiDebate(this.checked)"> Auto-Debate Scanned Stocks
+            </label>
+            <button class="btn go" id="btnRunAgentDebate" style="font-weight:600;padding:6px 14px" onclick="triggerAgentDebate()">
+              ⚡ Run AI Council Debate
+            </button>
+          </div>
+        </div>
+
+        <!-- Live Debate Progress Status -->
+        <div id="aiDebateLoading" style="display:none;padding:12px;background:var(--cell);border-radius:8px;border:1px solid var(--line);align-items:center;gap:12px">
+          <div class="led" style="background:var(--accent);box-shadow:0 0 10px var(--accent);animation:pulse-dot 1s infinite"></div>
+          <div style="flex-grow:1">
+            <div id="aiDebateStep" style="font-size:12px;font-weight:600;color:var(--ink)">Gathering Fyers live quotes and technicals…</div>
+            <div style="font-size:10.5px;color:var(--ink-3);margin-top:2px">Consulting Technical Analyst, Bullish Researcher, Bearish Researcher, and Trader Desk</div>
+          </div>
+        </div>
+
+        <!-- Live Debate Output Result -->
+        <div id="aiDebateResult" class="agent-debate-output"></div>
+      </div>
+    </div>
+  </section>
 
   <div class="grid">
     <main id="list"></main>
@@ -508,7 +732,7 @@ async function load(force){
   }catch(e){ STATE = {status:"error", error:String(e), scan:null, scanning:false}; }
   render();
   clearTimeout(TIMER);
-  TIMER = setTimeout(()=>load(false), STATE.scanning ? 2000 : ($("#auto").checked?15000:60000));
+  TIMER = setTimeout(()=>load(false), STATE.scanning ? 2000 : ($("#auto").checked ? 2000 : 30000));
 }
 
 function render(){
@@ -535,7 +759,7 @@ function render(){
     "No setup is graded and no entry, stop or target is produced.");
   else if(STATE.error) banner("Last refresh failed — showing the previous scan", STATE.error);
 
-  kpis(s); nifty(s); sectors(s); feeds(s); notes(s); counts(s); list(s); table(s);
+  kpis(s); nifty(s); sectors(s); feeds(s); notes(s); counts(s); list(s); table(s); updateQuickChips(s);
   if(window.ScannerAlerts){
     (s.picks||[]).forEach(p => window.ScannerAlerts.checkAndAlert(p, "BUY"));
     (s.candidates||[]).filter(c=>c.verdict==="WATCH").forEach(c => window.ScannerAlerts.checkAndAlert(c, "WATCH"));
@@ -737,10 +961,16 @@ function card(c){
   f.style.width = Math.max(0,Math.min(100,c.score))+"%";
   t.append(f); m.append(t);
 
+  const btnsWrap = el("div");
+  btnsWrap.style.display = "flex";
+  btnsWrap.style.gap = "6px";
+  btnsWrap.style.marginTop = "6px";
+  btnsWrap.style.alignItems = "center";
+  btnsWrap.style.flexWrap = "wrap";
+
   const tBtn = el("button","btn go","⚡ Take Trade");
   tBtn.style.fontSize = "11px";
   tBtn.style.padding = "3px 9px";
-  tBtn.style.marginTop = "5px";
   tBtn.onclick = async (e)=>{
     e.stopPropagation();
     tBtn.disabled = true;
@@ -778,23 +1008,38 @@ function card(c){
       tBtn.textContent = "⚡ Take Trade";
     }
   };
-  m.append(tBtn);
+  btnsWrap.append(tBtn);
+
+  const aiBtn = el("button","btn","🤖 AI Debate");
+  aiBtn.style.fontSize = "11px";
+  aiBtn.style.padding = "3px 9px";
+  aiBtn.style.background = "linear-gradient(135deg, rgba(47,159,219,.15), rgba(99,102,241,.18))";
+  aiBtn.style.borderColor = "rgba(47,159,219,.4)";
+  aiBtn.style.color = "var(--ink)";
+  aiBtn.title = "Summon the 4 AI Agents for deep multi-perspective debate on " + c.symbol;
+  aiBtn.onclick = (e)=>{
+    e.stopPropagation();
+    runAgentAnalysis(c.symbol);
+  };
+  btnsWrap.append(aiBtn);
+
+  m.append(btnsWrap);
 
   vw.append(m);
   hd.append(vw);
   box.append(hd);
 
-  const charts = el("div","charts");
-  const left = el("div");
-  left.append(el("div","cap","Session · 5-min close vs VWAP"));
-  const sp = spark(c);
-  left.append(sp || el("div","cap","no intraday bars"));
-  charts.append(left);
-  const right = el("div");
-  right.append(el("div","cap","Price against its levels"));
-  right.append(ladder(c));
-  charts.append(right);
-  box.append(charts);
+  const chartSec = el("div","chart-container");
+  const cc = candleChart(c);
+  chartSec.append(cc || el("div","cap","no intraday bars available"));
+
+  const ladSec = el("div","ladder-section");
+  const ladHdr = el("div","ladder-header");
+  ladHdr.append(el("div","cap","Price Against Strategy Range & Levels"));
+  ladSec.append(ladHdr);
+  ladSec.append(ladder(c));
+  chartSec.append(ladSec);
+  box.append(chartSec);
 
   if(c.trade) box.append(plan(c));
   else box.append(el("div","noplan","No entry — this setup does not qualify for a "
@@ -937,57 +1182,417 @@ function optionsPanel(c){
   return box;
 }
 
-/* Session path: today's 5-minute closes against the running VWAP, with the
-   breakout level as a rule. Two series, so both are labelled directly. */
-function spark(c){
-  const d = (c.spark||[]).filter(p=>isFinite(p.c)&&isFinite(p.w));
-  if(d.length < 2) return null;
-  const W=300, H=58, PL=4, PR=30, PT=8, PB=10;
-  const ys = d.flatMap(p=>[p.c,p.w]).concat(isFinite(c.or_high)?[c.or_high]:[]);
-  const lo=Math.min(...ys), hi=Math.max(...ys), rng=(hi-lo)||1;
-  const X=i=>PL + i*(W-PL-PR)/(d.length-1);
-  const Y=v=>H-PB-((v-lo)/rng)*(H-PT-PB);
-  const path=k=>d.map((p,i)=>(i?"L":"M")+X(i).toFixed(1)+" "+Y(p[k]).toFixed(1)).join(" ");
+/* 5-Minute Candlestick Chart with Complete Strategy Lines (VWAP, EMA9, EMA21,
+   Breakout Resistance, Stop Loss, Target 1, Target 2, Volume, and Interactive HUD). */
+function candleChart(c){
+  const raw = c.spark || [];
+  if(!raw.length) return null;
 
-  const wrap = el("div","spark");
-  const svg = document.createElementNS("http://www.w3.org/2000/svg","svg");
-  svg.setAttribute("viewBox","0 0 "+W+" "+H);
-  svg.setAttribute("preserveAspectRatio","none");
-  svg.setAttribute("role","img");
-  svg.setAttribute("aria-label","Today's 5-minute closes against VWAP; the values are listed beside the chart.");
-  const add=(tag,attrs,title)=>{const n=document.createElementNS("http://www.w3.org/2000/svg",tag);
-    for(const k in attrs) n.setAttribute(k,attrs[k]);
-    if(title){const t=document.createElementNS("http://www.w3.org/2000/svg","title");
-      t.textContent=title; n.append(t);} svg.append(n); return n;};
+  const d = raw.map(p => {
+    const o = (p.o !== undefined && isFinite(p.o)) ? p.o : p.c;
+    const cl = isFinite(p.c) ? p.c : o;
+    const h = (p.h !== undefined && isFinite(p.h)) ? p.h : Math.max(o, cl);
+    const l = (p.l !== undefined && isFinite(p.l)) ? p.l : Math.min(o, cl);
+    const v = (p.v !== undefined && isFinite(p.v)) ? p.v : 0;
+    const w = (p.w !== undefined && isFinite(p.w)) ? p.w : cl;
+    const e9 = (p.e9 !== undefined && p.e9 !== null && isFinite(p.e9)) ? p.e9 : null;
+    const e21 = (p.e21 !== undefined && p.e21 !== null && isFinite(p.e21)) ? p.e21 : null;
+    return { t: p.t, o, h, l, c: cl, v, w, e9, e21 };
+  }).filter(p => isFinite(p.c));
+
+  if(!d.length) return null;
+
+  const n = d.length;
+  const t = c.trade;
+
+  // Collect price data points to set Y-axis scale
+  const allPrices = [];
+  d.forEach(p => {
+    allPrices.push(p.h, p.l, p.o, p.c);
+    if(p.w) allPrices.push(p.w);
+    if(p.e9) allPrices.push(p.e9);
+    if(p.e21) allPrices.push(p.e21);
+  });
+  if(isFinite(c.or_high)) allPrices.push(c.or_high);
+  if(isFinite(c.or_low)) allPrices.push(c.or_low);
+  if(isFinite(c.price)) allPrices.push(c.price);
+  if(t){
+    if(isFinite(t.stop)) allPrices.push(t.stop);
+    if(isFinite(t.target1)) allPrices.push(t.target1);
+    if(isFinite(t.target2)) allPrices.push(t.target2);
+    if(isFinite(t.entry_low)) allPrices.push(t.entry_low);
+    if(isFinite(t.entry_high)) allPrices.push(t.entry_high);
+  }
+
+  const validPrices = allPrices.filter(v => typeof v === "number" && isFinite(v));
+  const minP = Math.min(...validPrices);
+  const maxP = Math.max(...validPrices);
+  const pad = ((maxP - minP) * 0.05) || 1.0;
+  const yMin = minP - pad;
+  const yMax = maxP + pad;
+  const rng = (yMax - yMin) || 1.0;
+
+  // Viewport dimensions
+  const W = 780, H = 220;
+  const PL = 8, PR = 66, PT = 14, PB = 28;
+  const chartW = W - PL - PR;
+  const totalH = H - PT - PB;
+  const priceH = totalH * 0.78;
+  const volH = totalH * 0.22;
+  const volBaseY = H - PB;
+
+  const X = i => n === 1 ? (PL + chartW / 2) : (PL + (i / (n - 1)) * chartW);
+  const Y = p => PT + (1 - (p - yMin) / rng) * priceH;
+
+  const candleW = Math.max(2.5, Math.min(10, (chartW / Math.max(n, 12)) * 0.72));
+  const maxVol = Math.max(...d.map(p => p.v), 1);
+
+  const wrap = el("div", "candle-card");
+
+  // Dynamic HUD Strip
+  const hud = el("div", "candle-hud");
+  const hudLeft = el("div", "candle-hud-title");
+  hudLeft.innerHTML = `<span style="font-size:12px">🕯️</span> <span>5-Min Candlestick &amp; Strategy Engine</span> <span class="chip" style="font-size:9.5px;padding:1px 5px">${n} Bars</span>`;
+  hud.append(hudLeft);
+
+  const hudVals = el("div", "candle-hud-vals");
+  const hudTime = el("span", null, "");
+  const hudO = el("span", null, "");
+  const hudH = el("span", null, "");
+  const hudL = el("span", null, "");
+  const hudC = el("span", null, "");
+  const hudV = el("span", null, "");
+  const hudW = el("span", null, "");
+  const hudE9 = el("span", null, "");
+  const hudE21 = el("span", null, "");
+
+  hudVals.append(hudTime, hudO, hudH, hudL, hudC, hudV, hudW, hudE9, hudE21);
+  hud.append(hudVals);
+  wrap.append(hud);
+
+  function updateHud(p){
+    const isUp = p.c >= p.o;
+    const diff = p.c - p.o;
+    const diffPct = p.o > 0 ? (diff / p.o * 100) : 0;
+    const chgClass = isUp ? "up" : "down";
+
+    hudTime.innerHTML = `<span style="color:var(--ink-3)">Time:</span> <b>${p.t}</b>`;
+    hudO.innerHTML = `<span style="color:var(--ink-3)">O:</span> <b>₹${num(p.o)}</b>`;
+    hudH.innerHTML = `<span style="color:var(--ink-3)">H:</span> <b>₹${num(p.h)}</b>`;
+    hudL.innerHTML = `<span style="color:var(--ink-3)">L:</span> <b>₹${num(p.l)}</b>`;
+    hudC.innerHTML = `<span style="color:var(--ink-3)">C:</span> <b class="${chgClass}">₹${num(p.c)} (${isUp ? "+" : ""}${diffPct.toFixed(2)}%)</b>`;
+    hudV.innerHTML = `<span style="color:var(--ink-3)">Vol:</span> <b>${p.v >= 1e5 ? (p.v/1e5).toFixed(1)+"L" : p.v >= 1e3 ? (p.v/1e3).toFixed(1)+"K" : p.v.toLocaleString("en-IN")}</b>`;
+    hudW.innerHTML = `<span style="color:#eab308">VWAP:</span> <b style="color:#eab308">₹${num(p.w)}</b>`;
+    if(p.e9 !== null) hudE9.innerHTML = `<span style="color:#38bdf8">EMA9:</span> <b style="color:#38bdf8">₹${num(p.e9)}</b>`;
+    else hudE9.innerHTML = "";
+    if(p.e21 !== null) hudE21.innerHTML = `<span style="color:#a855f7">EMA21:</span> <b style="color:#a855f7">₹${num(p.e21)}</b>`;
+    else hudE21.innerHTML = "";
+  }
+
+  updateHud(d[n - 1]);
+
+  const svgWrap = el("div", "candle-svg-wrap");
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  svg.setAttribute("preserveAspectRatio", "none");
+
+  const add = (tag, attrs, title) => {
+    const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
+    for(const k in attrs) node.setAttribute(k, attrs[k]);
+    if(title){
+      const tNode = document.createElementNS("http://www.w3.org/2000/svg", "title");
+      tNode.textContent = title;
+      node.append(tNode);
+    }
+    svg.append(node);
+    return node;
+  };
+
+  // Horizontal Grid Lines & Y-Axis Labels
+  for(let i = 0; i <= 4; i++){
+    const pVal = yMin + (i / 4) * rng;
+    const yPos = Y(pVal);
+    add("line", {
+      x1: PL, x2: W - PR, y1: yPos, y2: yPos,
+      stroke: "rgba(255,255,255,0.06)", "stroke-dasharray": "3,4", "stroke-width": 1
+    });
+    const txt = add("text", {
+      x: W - PR + 6, y: yPos + 3.5, fill: "var(--ink-3)",
+      "font-size": 9.5, "font-family": "ui-monospace, monospace"
+    });
+    txt.textContent = "₹" + num(pVal);
+  }
+
+  // Vertical Grid Lines & X-Axis Time Labels
+  const step = Math.max(1, Math.round(n / 6));
+  for(let i = 0; i < n; i += step){
+    const cx = X(i);
+    add("line", {
+      x1: cx, x2: cx, y1: PT, y2: H - PB,
+      stroke: "rgba(255,255,255,0.04)", "stroke-dasharray": "2,4", "stroke-width": 1
+    });
+    const tTxt = add("text", {
+      x: cx, y: H - PB + 13, "text-anchor": "middle", fill: "var(--ink-3)",
+      "font-size": 9, "font-family": "ui-monospace, monospace"
+    });
+    tTxt.textContent = d[i].t;
+  }
+  if((n - 1) % step !== 0 && ((n - 1) - ((n - 1) % step)) > step / 2){
+    const lastX = X(n - 1);
+    const tTxt = add("text", {
+      x: lastX, y: H - PB + 13, "text-anchor": "middle", fill: "var(--ink-3)",
+      "font-size": 9, "font-family": "ui-monospace, monospace"
+    });
+    tTxt.textContent = d[n - 1].t;
+  }
+
+  // Volume baseline separator & label
+  add("line", {
+    x1: PL, x2: W - PR, y1: volBaseY - volH, y2: volBaseY - volH,
+    stroke: "rgba(255,255,255,0.06)", "stroke-width": 1
+  });
+  const vLbl = add("text", {
+    x: PL + 2, y: volBaseY - volH + 9, fill: "var(--ink-3)", "font-size": 8, "font-weight": 700
+  });
+  vLbl.textContent = "VOL";
+
+  // Volume Bars
+  d.forEach((p, i) => {
+    const cx = X(i);
+    const vHeight = maxVol > 0 ? (p.v / maxVol) * (volH - 3) : 0;
+    const isUp = p.c >= p.o;
+    const vColor = isUp ? "rgba(52, 211, 153, 0.40)" : "rgba(239, 68, 68, 0.40)";
+    add("rect", {
+      x: cx - candleW / 2, y: volBaseY - vHeight,
+      width: Math.max(1.5, candleW), height: Math.max(0.5, vHeight),
+      fill: vColor, rx: 0.5
+    }, `${p.t} Vol: ${p.v.toLocaleString("en-IN")}`);
+  });
+
+  // Opening Range (OR) Zone Band
+  if(isFinite(c.or_high) && isFinite(c.or_low)){
+    const topY = Y(c.or_high);
+    const botY = Y(c.or_low);
+    add("rect", {
+      x: PL, y: topY, width: chartW, height: Math.max(2, botY - topY),
+      fill: "rgba(56, 189, 248, 0.06)", stroke: "rgba(56, 189, 248, 0.22)",
+      "stroke-dasharray": "3,3", "stroke-width": 0.8
+    }, `Opening Range (09:15-09:30): ₹${num(c.or_low)} - ₹${num(c.or_high)}`);
+  }
+
+  // Entry Zone Band (if trade exists)
+  if(t && isFinite(t.entry_low) && isFinite(t.entry_high)){
+    const topY = Y(t.entry_high);
+    const botY = Y(t.entry_low);
+    add("rect", {
+      x: PL, y: topY, width: chartW, height: Math.max(2, botY - topY),
+      fill: "rgba(47, 159, 219, 0.12)", stroke: "rgba(47, 159, 219, 0.40)",
+      "stroke-dasharray": "3,3", "stroke-width": 1
+    }, `Entry Zone: ₹${num(t.entry_low)} - ₹${num(t.entry_high)}`);
+  }
+
+  // Horizontal Strategy Level Lines & Tags
+  const drawLevel = (val, color, bgFill, textFill, label, strokeDash = "4,3", strokeWidth = 1.4) => {
+    if(typeof val !== "number" || !isFinite(val)) return;
+    const yPos = Y(val);
+    if(yPos < PT - 5 || yPos > H - PB + 5) return;
+
+    add("line", {
+      x1: PL, x2: W - PR, y1: yPos, y2: yPos,
+      stroke: color, "stroke-dasharray": strokeDash, "stroke-width": strokeWidth, opacity: 0.9
+    });
+
+    add("rect", {
+      x: W - PR + 3, y: yPos - 7, width: 62, height: 14, rx: 3,
+      fill: bgFill, stroke: color, "stroke-width": 0.6
+    });
+    const tag = add("text", {
+      x: W - PR + 5, y: yPos + 3.5, fill: textFill,
+      "font-size": 8.5, "font-weight": 700, "font-family": "ui-monospace, monospace"
+    });
+    tag.textContent = label;
+  };
 
   if(isFinite(c.or_high)){
-    add("line",{x1:PL,x2:W-PR,y1:Y(c.or_high),y2:Y(c.or_high),stroke:"var(--ink-3)",
-      "stroke-width":1,"vector-effect":"non-scaling-stroke",opacity:.8},
-      "breakout level " + num(c.or_high));
+    drawLevel(c.or_high, "#38bdf8", "rgba(14,116,144,0.9)", "#e0f2fe", `OR-H ₹${num(c.or_high)}`, "4,4", 1.3);
   }
-  add("path",{d:path("w"),fill:"none",stroke:"var(--ink-3)","stroke-width":1.5,
-    "vector-effect":"non-scaling-stroke"}, "VWAP");
-  add("path",{d:path("c"),fill:"none",stroke:"var(--accent)","stroke-width":2,
-    "stroke-linejoin":"round","vector-effect":"non-scaling-stroke"}, "5-minute close");
-  // Direct labels beat a legend box here, but they must not stack on top of
-  // each other — drop the lower-priority label when two would collide.
-  const placed=[];
-  const lab=(txt,y,fill)=>{
-    if(placed.some(p=>Math.abs(p-y) < 9)) return;
-    placed.push(y);
-    add("text",{x:W-PR+4,y:y+3,fill:fill,"font-size":8}).textContent = txt;
-  };
-  lab("PX",   Y(d[d.length-1].c), "var(--accent)");
-  lab("VWAP", Y(d[d.length-1].w), "var(--ink-3)");
-  if(isFinite(c.or_high)) lab("R", Y(c.or_high), "var(--ink-3)");
-  wrap.append(svg);
+  if(isFinite(c.or_low)){
+    drawLevel(c.or_low, "#f43f5e", "rgba(159,18,57,0.9)", "#ffe4e6", `OR-L ₹${num(c.or_low)}`, "4,4", 1.3);
+  }
 
-  // End-of-line marker in HTML so it stays a circle under the stretched viewBox.
-  const dot = el("div","end");
-  dot.style.left = (X(d.length-1)/W*100)+"%";
-  dot.style.top  = (Y(d[d.length-1].c)/H*100)+"%";
-  dot.title = d[d.length-1].t + " close " + num(d[d.length-1].c);
-  wrap.append(dot);
+  if(t){
+    if(isFinite(t.stop)){
+      drawLevel(t.stop, "#ef4444", "rgba(127,29,29,0.85)", "#fca5a5", `■ SL ₹${num(t.stop)}`, "4,3", 1.5);
+    }
+    if(isFinite(t.target1)){
+      drawLevel(t.target1, "#10b981", "rgba(6,78,59,0.85)", "#6ee7b7", `▲ T1 ₹${num(t.target1)}`, "4,3", 1.5);
+    }
+    if(isFinite(t.target2)){
+      drawLevel(t.target2, "#34d399", "rgba(6,78,59,0.85)", "#a7f3d0", `▲ T2 ₹${num(t.target2)}`, "4,3", 1.5);
+    }
+  }
+
+  // Candlesticks (OHLC Bodies & Wicks)
+  d.forEach((p, i) => {
+    const cx = X(i);
+    const isUp = p.c >= p.o;
+    const color = isUp ? "#22c55e" : "#ef4444";
+    const wickTop = Y(p.h);
+    const wickBot = Y(p.l);
+    const bodyTop = Y(Math.max(p.o, p.c));
+    const bodyBot = Y(Math.min(p.o, p.c));
+    const bodyHeight = Math.max(1.8, bodyBot - bodyTop);
+
+    add("line", {
+      x1: cx, x2: cx, y1: wickTop, y2: wickBot,
+      stroke: color, "stroke-width": 1.2
+    });
+
+    add("rect", {
+      x: cx - candleW / 2, y: bodyTop,
+      width: candleW, height: bodyHeight,
+      fill: color, stroke: color, "stroke-width": 0.5, rx: 0.8
+    });
+  });
+
+  // Strategy Curves: VWAP, EMA9, EMA21
+  const vwapPoints = d.filter(p => isFinite(p.w));
+  if(vwapPoints.length >= 2){
+    const vwapPath = vwapPoints.map((p, i) => (i ? "L" : "M") + X(d.indexOf(p)).toFixed(1) + " " + Y(p.w).toFixed(1)).join(" ");
+    add("path", {
+      d: vwapPath, fill: "none", stroke: "#eab308", "stroke-width": 1.9,
+      "stroke-linecap": "round", "stroke-linejoin": "round"
+    }, "VWAP Line");
+  }
+
+  const e9Points = d.filter(p => p.e9 !== null && isFinite(p.e9));
+  if(e9Points.length >= 2){
+    const e9Path = e9Points.map((p, i) => (i ? "L" : "M") + X(d.indexOf(p)).toFixed(1) + " " + Y(p.e9).toFixed(1)).join(" ");
+    add("path", {
+      d: e9Path, fill: "none", stroke: "#38bdf8", "stroke-width": 1.6,
+      "stroke-linecap": "round", "stroke-linejoin": "round"
+    }, "EMA 9 Line");
+  }
+
+  const e21Points = d.filter(p => p.e21 !== null && isFinite(p.e21));
+  if(e21Points.length >= 2){
+    const e21Path = e21Points.map((p, i) => (i ? "L" : "M") + X(d.indexOf(p)).toFixed(1) + " " + Y(p.e21).toFixed(1)).join(" ");
+    add("path", {
+      d: e21Path, fill: "none", stroke: "#a855f7", "stroke-width": 1.6,
+      "stroke-dasharray": "4,2", "stroke-linecap": "round", "stroke-linejoin": "round"
+    }, "EMA 21 Line");
+  }
+
+  // Live Price Marker
+  const lastBar = d[n - 1];
+  const lastX = X(n - 1);
+  const lastY = Y(lastBar.c);
+  add("circle", {
+    cx: lastX, cy: lastY, r: 3.5, fill: "#38bdf8", stroke: "var(--card)", "stroke-width": 1.5
+  });
+
+  add("rect", {
+    x: W - PR + 3, y: lastY - 7, width: 59, height: 14, rx: 3,
+    fill: "#0284c7", stroke: "#38bdf8", "stroke-width": 0.8
+  });
+  const curTag = add("text", {
+    x: W - PR + 6, y: lastY + 3.5, fill: "#ffffff",
+    "font-size": 8.5, "font-weight": 700, "font-family": "ui-monospace, monospace"
+  });
+  curTag.textContent = "₹" + num(lastBar.c);
+
+  // Interactive Crosshair
+  const crossGroup = document.createElementNS("http://www.w3.org/2000/svg", "g");
+  crossGroup.setAttribute("class", "candle-crosshair");
+  crossGroup.style.display = "none";
+
+  const vCross = document.createElementNS("http://www.w3.org/2000/svg", "line");
+  vCross.setAttribute("y1", String(PT));
+  vCross.setAttribute("y2", String(H - PB));
+  vCross.setAttribute("stroke", "rgba(255,255,255,0.35)");
+  vCross.setAttribute("stroke-dasharray", "3,3");
+  vCross.setAttribute("stroke-width", "1");
+  crossGroup.append(vCross);
+
+  const hCross = document.createElementNS("http://www.w3.org/2000/svg", "line");
+  hCross.setAttribute("x1", String(PL));
+  hCross.setAttribute("x2", String(W - PR));
+  hCross.setAttribute("stroke", "rgba(255,255,255,0.35)");
+  hCross.setAttribute("stroke-dasharray", "3,3");
+  hCross.setAttribute("stroke-width", "1");
+  crossGroup.append(hCross);
+
+  const hoverDot = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+  hoverDot.setAttribute("r", "4");
+  hoverDot.setAttribute("fill", "var(--accent)");
+  hoverDot.setAttribute("stroke", "var(--ink)");
+  hoverDot.setAttribute("stroke-width", "1.5");
+  crossGroup.append(hoverDot);
+
+  svg.append(crossGroup);
+
+  const overlay = add("rect", {
+    x: PL, y: PT, width: chartW, height: totalH,
+    fill: "transparent", cursor: "crosshair"
+  });
+
+  const handlePointer = (clientX) => {
+    const rect = svg.getBoundingClientRect();
+    const relX = ((clientX - rect.left) / rect.width) * W;
+    const barIdx = Math.max(0, Math.min(n - 1, Math.round(((relX - PL) / chartW) * (n - 1))));
+    const bar = d[barIdx];
+    if(!bar) return;
+
+    const bx = X(barIdx);
+    const by = Y(bar.c);
+
+    vCross.setAttribute("x1", String(bx));
+    vCross.setAttribute("x2", String(bx));
+    hCross.setAttribute("y1", String(by));
+    hCross.setAttribute("y2", String(by));
+    hoverDot.setAttribute("cx", String(bx));
+    hoverDot.setAttribute("cy", String(by));
+    crossGroup.style.display = "";
+
+    updateHud(bar);
+  };
+
+  overlay.addEventListener("mousemove", e => handlePointer(e.clientX));
+  overlay.addEventListener("touchmove", e => {
+    if(e.touches && e.touches.length) handlePointer(e.touches[0].clientX);
+  });
+  overlay.addEventListener("mouseleave", () => {
+    crossGroup.style.display = "none";
+    updateHud(d[n - 1]);
+  });
+  overlay.addEventListener("touchend", () => {
+    crossGroup.style.display = "none";
+    updateHud(d[n - 1]);
+  });
+
+  svgWrap.append(svg);
+  wrap.append(svgWrap);
+
+  // Strategy Legend
+  const leg = el("div", "candle-legend");
+  const legItem = (iconHtml, label, color) => {
+    const item = el("div", "candle-legend-item");
+    item.innerHTML = iconHtml + `<span style="color:${color || 'inherit'}">${label}</span>`;
+    leg.append(item);
+  };
+
+  legItem(`<span class="candle-legend-line" style="border-color:#eab308"></span>`, "VWAP (Session)", "#eab308");
+  legItem(`<span class="candle-legend-line" style="border-color:#38bdf8"></span>`, "EMA 9", "#38bdf8");
+  legItem(`<span class="candle-legend-line candle-legend-dashed" style="border-color:#a855f7"></span>`, "EMA 21", "#a855f7");
+  if(isFinite(c.or_high))
+    legItem(`<span class="candle-legend-line candle-legend-dashed" style="border-color:#94a3b8"></span>`, `Breakout ₹${num(c.or_high)}`, "#94a3b8");
+  if(t){
+    legItem(`<span class="candle-legend-line candle-legend-dashed" style="border-color:#ef4444"></span>`, `Stop Loss ₹${num(t.stop)}`, "#fca5a5");
+    legItem(`<span class="candle-legend-line candle-legend-dashed" style="border-color:#10b981"></span>`, `Target 1 ₹${num(t.target1)}`, "#6ee7b7");
+    legItem(`<span class="candle-legend-line candle-legend-dashed" style="border-color:#34d399"></span>`, `Target 2 ₹${num(t.target2)}`, "#a7f3d0");
+  }
+
+  wrap.append(leg);
   return wrap;
 }
 
@@ -1080,7 +1685,12 @@ function table(s){
   rows.forEach(c=>{
     const tr=el("tr");
     tr.dataset.rowSym = c.symbol;
-    tr.append(el("td","sym",c.symbol));
+    const symTd = el("td","sym");
+    symTd.style.cursor = "pointer";
+    symTd.title = "Click to run AI Council Debate for " + c.symbol;
+    symTd.onclick = () => runAgentAnalysis(c.symbol);
+    symTd.innerHTML = `<span style="border-bottom:1px dotted var(--link)">${c.symbol}</span> <span style="font-size:10px;opacity:0.8" title="Consult AI Agents">🤖</span>`;
+    tr.append(symTd);
     const v=el("td"); v.append(badge(c.verdict,"sm v-"+c.verdict.toLowerCase()));
     tr.append(v);
     tr.append(el("td","num mono", sc(c.score)+" "+c.grade));
@@ -1193,8 +1803,348 @@ async function loadQuotes(){
   }
 }
 
+/* ---------- AI Agent Intelligence Desk ---------- */
+function setAiSymbol(sym){
+  const inp = document.getElementById("aiAgentSymInput");
+  if(inp){
+    inp.value = sym.toUpperCase().trim();
+  }
+}
+
+function toggleAgentDesk(){
+  const body = document.getElementById("agentDeskBody");
+  const btn = document.getElementById("btnToggleAgents");
+  if(!body || !btn) return;
+  const isHidden = body.style.display === "none";
+  body.style.display = isHidden ? "block" : "none";
+  btn.textContent = isHidden ? "Minimize Desk" : "Expand Desk";
+}
+
+function updateQuickChips(s){
+  const box = document.getElementById("agentQuickChips");
+  if(!box || !s || !s.candidates) return;
+  const topSyms = s.candidates.slice(0, 8).map(c => c.symbol);
+  if(!topSyms.length) return;
+  const defaultList = ["RELIANCE", "SBIN", "HDFCBANK", "ICICIBANK", "INFY", "TCS"];
+  const combined = Array.from(new Set([...topSyms, ...defaultList])).slice(0, 10);
+  box.innerHTML = "";
+  combined.forEach(sym => {
+    const chip = el("span", "agent-chip", sym);
+    chip.onclick = () => setAiSymbol(sym);
+    box.appendChild(chip);
+  });
+}
+
+function runAgentAnalysis(sym){
+  setAiSymbol(sym);
+  const panel = document.getElementById("agentDeskPanel");
+  if(panel){
+    panel.scrollIntoView({behavior: "smooth", block: "start"});
+    const body = document.getElementById("agentDeskBody");
+    const btn = document.getElementById("btnToggleAgents");
+    if(body && body.style.display === "none"){
+      body.style.display = "block";
+      if(btn) btn.textContent = "Minimize Desk";
+    }
+  }
+  triggerAgentDebate();
+}
+
+let autoDebateTimer = null;
+function toggleAutoAiDebate(enabled){
+  clearInterval(autoDebateTimer);
+  if(enabled){
+    triggerAgentDebate();
+    autoDebateTimer = setInterval(() => {
+      const chk = document.getElementById("chkAutoAiDebate");
+      if(!chk || !chk.checked){
+        clearInterval(autoDebateTimer);
+        return;
+      }
+      if(STATE && STATE.scan && STATE.scan.candidates && STATE.scan.candidates.length){
+        const syms = STATE.scan.candidates.map(c => c.symbol);
+        const currentSym = (document.getElementById("aiAgentSymInput")?.value || "").toUpperCase();
+        let nextIdx = (syms.indexOf(currentSym) + 1) % syms.length;
+        setAiSymbol(syms[nextIdx]);
+      }
+      triggerAgentDebate();
+    }, 15000);
+  }
+}
+
+let debateInterval = null;
+const debateStages = [
+  "⚡ Ingesting live ticks & 15m OHLCV candles via Fyers API v3…",
+  "📊 Technical Analyst calculating EMA 9/21/50, RSI(14), ATR & VWAP…",
+  "🐂 Bullish Researcher formulating momentum and breakout thesis…",
+  "🐻 Bearish Researcher auditing bull traps, fakeouts and supply zones…",
+  "⚖️ Trader Decision Desk synthesizing multi-agent debate and risk rules…"
+];
+
+async function triggerAgentDebate(){
+  const inp = document.getElementById("aiAgentSymInput");
+  const btn = document.getElementById("btnRunAgentDebate");
+  const loading = document.getElementById("aiDebateLoading");
+  const stepText = document.getElementById("aiDebateStep");
+  const resBox = document.getElementById("aiDebateResult");
+
+  if(!inp || !btn) return;
+  const sym = (inp.value || "").toUpperCase().trim();
+  if(!sym){
+    alert("Please enter a stock symbol (e.g. RELIANCE, SBIN, TCS)");
+    return;
+  }
+
+  btn.disabled = true;
+  btn.textContent = "Debating…";
+  if(resBox) resBox.style.display = "none";
+  if(loading) loading.style.display = "flex";
+
+  let stageIdx = 0;
+  if(stepText) stepText.textContent = debateStages[0];
+  clearInterval(debateInterval);
+  debateInterval = setInterval(() => {
+    stageIdx = (stageIdx + 1) % debateStages.length;
+    if(stepText) stepText.textContent = debateStages[stageIdx];
+  }, 1600);
+
+  try {
+    const res = await fetch("/api/ai-scan", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ symbol: sym, min_conviction: 7 })
+    });
+    const data = await res.json();
+    clearInterval(debateInterval);
+    if(loading) loading.style.display = "none";
+    btn.disabled = false;
+    btn.textContent = "⚡ Run AI Council Debate";
+
+    if(data.ok && data.recommendation){
+      renderAgentDebateResult(data);
+    } else {
+      if(resBox){
+        resBox.style.display = "block";
+        resBox.innerHTML = `
+          <div style="padding:14px;background:rgba(224,90,112,0.12);border:1px solid var(--bad);border-radius:8px;color:var(--bad)">
+            <strong style="display:flex;align-items:center;gap:6px">
+              <span>✗ AI Council Analysis Failed for ${sym}</span>
+            </strong>
+            <p style="margin:6px 0 0 0;font-size:12px;color:var(--ink-2)">
+              ${data.error || "Unable to retrieve quotes or generate recommendation."}
+            </p>
+          </div>
+        `;
+      }
+    }
+  } catch(err){
+    clearInterval(debateInterval);
+    if(loading) loading.style.display = "none";
+    btn.disabled = false;
+    btn.textContent = "⚡ Run AI Council Debate";
+    if(resBox){
+      resBox.style.display = "block";
+      resBox.innerHTML = `
+        <div style="padding:14px;background:rgba(224,90,112,0.12);border:1px solid var(--bad);border-radius:8px;color:var(--bad)">
+          <strong>✗ Error communicating with AI Desk:</strong> ${err}
+        </div>
+      `;
+    }
+  }
+}
+
+function renderAgentDebateResult(data){
+  const resBox = document.getElementById("aiDebateResult");
+  if(!resBox) return;
+
+  const rec = data.recommendation;
+  const sym = data.symbol;
+  const act = rec.action || "HOLD";
+  const conv = rec.conviction || 5;
+
+  let actColor = "var(--warn)";
+  let actBg = "var(--warn-soft)";
+  let actBorder = "rgba(201,133,0,.3)";
+  if(act === "BUY"){
+    actColor = "var(--good)";
+    actBg = "var(--good-soft)";
+    actBorder = "rgba(52,211,153,.35)";
+  } else if(act === "SELL"){
+    actColor = "var(--bad)";
+    actBg = "var(--bad-soft)";
+    actBorder = "rgba(224,90,112,.35)";
+  }
+
+  const ep = rec.entry_price || 0;
+  const sl = rec.stop_loss || 0;
+  const tg = rec.target || 0;
+  const risk = ep > 0 && sl > 0 ? Math.abs(ep - sl) : 0;
+  const reward = ep > 0 && tg > 0 ? Math.abs(tg - ep) : 0;
+  const rr = risk > 0 ? (reward / risk).toFixed(2) : "—";
+  const riskPct = ep > 0 && risk > 0 ? ((risk / ep) * 100).toFixed(2) + "%" : "—";
+  const rewardPct = ep > 0 && reward > 0 ? ((reward / ep) * 100).toFixed(2) + "%" : "—";
+
+  resBox.style.display = "block";
+  resBox.innerHTML = `
+    <div class="debate-verdict-hdr">
+      <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+        <span style="font-size:18px;font-weight:800;letter-spacing:-.01em;color:var(--ink)">NSE:${sym}</span>
+        <span class="agent-badge" style="font-size:12px;padding:4px 10px;background:${actBg};color:${actColor};border:1px solid ${actBorder}">
+          VERDICT: ${act}
+        </span>
+        <span style="font-size:11px;color:var(--ink-3);font-family:ui-monospace,monospace">
+          Evaluated at ${new Date().toLocaleTimeString("en-IN", {hour12:false})} IST
+        </span>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px">
+        <div style="text-align:right">
+          <div style="font-size:10px;text-transform:uppercase;color:var(--ink-3);letter-spacing:.05em">Council Conviction</div>
+          <div style="font-size:15px;font-weight:700;font-family:ui-monospace,monospace;color:${conv >= 7 ? 'var(--good)' : 'var(--warn)'}">
+            ${conv} / 10 · ${conv * 10}%
+          </div>
+        </div>
+        <div style="width:70px;height:7px;background:var(--track);border-radius:99px;overflow:hidden">
+          <div style="width:${conv * 10}%;height:100%;background:${conv >= 7 ? 'var(--good)' : 'var(--warn)'};border-radius:99px"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Key Trading Matrix -->
+    <div class="debate-scores">
+      <div class="debate-stat">
+        <div class="lbl">Entry Level</div>
+        <div class="val" style="color:var(--ink)">₹${num(ep)}</div>
+      </div>
+      <div class="debate-stat">
+        <div class="lbl">Stop Loss</div>
+        <div class="val" style="color:var(--bad)">₹${num(sl)} <span style="font-size:10px;color:var(--ink-3)">(${riskPct})</span></div>
+      </div>
+      <div class="debate-stat">
+        <div class="lbl">Target</div>
+        <div class="val" style="color:var(--good)">₹${num(tg)} <span style="font-size:10px;color:var(--ink-3)">(${rewardPct})</span></div>
+      </div>
+      <div class="debate-stat">
+        <div class="lbl">Risk / Reward</div>
+        <div class="val" style="color:var(--accent)">1 : ${rr}</div>
+      </div>
+      <div class="debate-stat">
+        <div class="lbl">Decision Gate</div>
+        <div class="val" style="color:${conv >= 7 ? 'var(--good)' : 'var(--warn)'}">
+          ${conv >= 7 ? '✓ Approved' : '✗ Hold Filter'}
+        </div>
+      </div>
+    </div>
+
+    <!-- The 4 Agent Perspectives -->
+    <div class="debate-perspectives">
+      <div class="perspective-card" style="border-left: 3px solid var(--accent)">
+        <div class="perspective-title" style="color:var(--accent)">
+          <span>📊 Technical Analyst View</span>
+        </div>
+        <div class="perspective-body">
+          ${rec.technical_analysis || "No technical breakdown available."}
+        </div>
+      </div>
+
+      <div class="perspective-card" style="border-left: 3px solid var(--good)">
+        <div class="perspective-title" style="color:var(--good)">
+          <span>🐂 Bullish Researcher Thesis</span>
+        </div>
+        <div class="perspective-body">
+          ${rec.bull_case || "No bullish arguments presented."}
+        </div>
+      </div>
+
+      <div class="perspective-card" style="border-left: 3px solid var(--bad)">
+        <div class="perspective-title" style="color:var(--bad)">
+          <span>🐻 Bearish Researcher Counter-Audit</span>
+        </div>
+        <div class="perspective-body">
+          ${rec.bear_case || "No counter-arguments found."}
+        </div>
+      </div>
+
+      <div class="perspective-card" style="border-left: 3px solid #a855f7">
+        <div class="perspective-title" style="color:#c084fc">
+          <span>⚖️ Trader Decision Desk Synthesis</span>
+        </div>
+        <div class="perspective-body">
+          ${rec.decision_rationale || "No final rationale recorded."}
+        </div>
+      </div>
+    </div>
+
+    <!-- Execution Action Bar -->
+    <div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
+      <div style="font-size:11.5px;color:var(--ink-2)">
+        ${act === 'HOLD'
+          ? 'ℹ Committee recommended HOLD — conviction is below 7/10 or risk/reward is unfavorable.'
+          : '⚡ Committee issued high-conviction order directive. Ready for execution in ledger.'}
+      </div>
+      <div style="display:flex;align-items:center;gap:8px">
+        ${act !== 'HOLD' ? `
+          <button class="btn go" id="btnExecAiTrade" style="padding:6px 14px;font-weight:700" onclick="executeAiTradeDirect('${sym}', '${act}', ${ep}, ${sl}, ${tg})">
+            ⚡ Execute ${act} Paper Trade (₹${num(ep)})
+          </button>
+        ` : ''}
+        <button class="btn" style="padding:6px 12px" onclick="triggerAgentDebate()">🔄 Re-debate</button>
+      </div>
+    </div>
+    <div id="aiTradeExecMsg" style="margin-top:8px;font-size:11.5px;font-weight:600"></div>
+  `;
+}
+
+async function executeAiTradeDirect(sym, side, px, sl, tg){
+  const btn = document.getElementById("btnExecAiTrade");
+  const msg = document.getElementById("aiTradeExecMsg");
+  if(btn) btn.disabled = true;
+  if(msg){
+    msg.style.color = "var(--ink-2)";
+    msg.textContent = "Placing paper trade in SQLite ledger…";
+  }
+
+  try {
+    const res = await fetch("/api/trade", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({
+        symbol: sym,
+        side: side,
+        qty: 15,
+        price: px,
+        stop_loss: sl,
+        target: tg,
+        strategy_id: "agent_debate_desk"
+      })
+    });
+    const j = await res.json();
+    if(j.ok){
+      if(msg){
+        msg.style.color = "var(--good)";
+        msg.textContent = "✓ Order executed! Trade #" + j.trade_id + " recorded in ledger. Live P&L tracked in Dashboard.";
+      }
+      if(btn){
+        btn.textContent = "✓ Trade #" + j.trade_id + " Placed";
+        btn.style.background = "var(--good)";
+      }
+    } else {
+      if(msg){
+        msg.style.color = "var(--bad)";
+        msg.textContent = "✗ Rejected by Risk Kernel: " + (j.reason || j.error || "Order rejected");
+      }
+      if(btn) btn.disabled = false;
+    }
+  } catch(err){
+    if(msg){
+      msg.style.color = "var(--bad)";
+      msg.textContent = "✗ Error: " + err;
+    }
+    if(btn) btn.disabled = false;
+  }
+}
+
 loadQuotes();
-setInterval(loadQuotes, 3000);
+setInterval(loadQuotes, 2000);
 __THEMEJS__
 </script>
 </body></html>

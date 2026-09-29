@@ -207,12 +207,17 @@ class FyersClient:
             elif isinstance(res, dict) and res.get("s") == "error":
                 raise FyersError(res.get("message") or "Fyers history error")
 
-        # 2. Fallback to HTTP proxy
-        data = self._get("/api/fyers/history",
-                         {"symbol": symbol, "resolution": resolution, "days": days})
-        if data.get("error"):
-            raise FyersError(str(data["error"]))
-        return data.get("candles") or []
+        # 2. Fallback to HTTP proxy only if not already talking to our own local server
+        if not model and "localhost:3001" not in self.base and "127.0.0.1:3001" not in self.base:
+            try:
+                data = self._get("/api/fyers/history",
+                                 {"symbol": symbol, "resolution": resolution, "days": days})
+                if data.get("error"):
+                    raise FyersError(str(data["error"]))
+                return data.get("candles") or []
+            except Exception:
+                pass
+        return []
 
     def quotes(self, symbols: list[str]) -> list[dict]:
         """Fetch quotes for a list of symbols (e.g. ['NSE:NIFTY50-INDEX', 'NSE:RELIANCE-EQ'])."""
@@ -226,15 +231,17 @@ class FyersClient:
                     return res["d"]
             except Exception:
                 pass
-        # 2. Proxy query
-        try:
-            data = self._get("/api/fyers/quotes", {"symbols": sym_str})
-            if isinstance(data, dict) and data.get("s") == "ok" and "d" in data:
-                return data["d"]
-            if isinstance(data, list):
-                return data
-        except Exception:
-            pass
+            return []
+        # 2. Proxy query (only if not self-referential)
+        if "localhost:3001" not in self.base and "127.0.0.1:3001" not in self.base:
+            try:
+                data = self._get("/api/fyers/quotes", {"symbols": sym_str})
+                if isinstance(data, dict) and data.get("s") == "ok" and "d" in data:
+                    return data["d"]
+                if isinstance(data, list):
+                    return data
+            except Exception:
+                pass
         return []
 
 
@@ -367,7 +374,7 @@ a:hover{{background:#2ea043;}}
   <h2>&#10003; Fyers Connected!</h2>
   <p>Welcome, <b>{name}</b>. Your Fyers API v3 session is now active with zero-delay live market data.</p>
   <p style="color:#8b949e;font-size:13px">You can now return to the Trading Dashboard.</p>
-  <a href="http://localhost:8787/">Open Dashboard</a>
+  <a href="http://localhost:8080/">Open Dashboard</a>
 </div>
 </body>
 </html>"""
@@ -397,7 +404,29 @@ a:hover{{background:#2ea043;}}
             days = int(query.get("days", ["5"])[0])
             try:
                 client = FyersClient()
-                candles = client.history(sym, res, days)
+                model = client._get_direct_model()
+                if not model:
+                    return self._send_json(401, {"error": "Fyers token not configured"})
+                now = datetime.now(IST)
+                range_from = (now - pd.Timedelta(days=days)).strftime("%Y-%m-%d")
+                range_to = now.strftime("%Y-%m-%d")
+                req = {
+                    "symbol": sym,
+                    "resolution": str(res),
+                    "date_format": "1",
+                    "range_from": range_from,
+                    "range_to": range_to,
+                    "cont_flag": "1",
+                }
+                hres = model.history(data=req)
+                candles = []
+                if isinstance(hres, dict) and hres.get("s") == "ok":
+                    for c in (hres.get("candles") or []):
+                        if len(c) >= 6:
+                            candles.append({
+                                "timestamp": c[0], "open": c[1], "high": c[2],
+                                "low": c[3], "close": c[4], "volume": c[5]
+                            })
                 return self._send_json(200, {"candles": candles})
             except Exception as exc:
                 return self._send_json(500, {"error": str(exc)})

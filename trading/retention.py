@@ -77,10 +77,9 @@ def plan(keep_days: int = RETENTION_DAYS) -> dict:
     if REPORTS_DIR.exists():
         reports = sorted(REPORTS_DIR.glob("*.md"))
         out["reports"] = [p for p in reports[:-keep_days]] if len(reports) > keep_days else []
-    if CANDLE_DIR.exists():
-        edge = datetime.now(IST) - timedelta(days=keep_days)
-        out["candles"] = [p for p in CANDLE_DIR.glob("*.pkl")
-                          if datetime.fromtimestamp(p.stat().st_mtime, IST) < edge]
+    # Deliberately exclude data/candles/ from pruning so the backtest cache
+    # can accumulate historical candles beyond yfinance's ~60-day window.
+    out["candles"] = []
     return out
 
 

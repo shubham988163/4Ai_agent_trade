@@ -90,6 +90,51 @@ def breakeven_pct(price: float, qty: int) -> float:
     return breakeven_move(price, qty) / price if price > 0 else float("inf")
 
 
+def compute_cost_risk_ratio(
+    entry_price: float,
+    stop_loss: float,
+    qty: int = 1,
+    slippage_pct: float | None = None,
+) -> float:
+    """Compute round-trip friction as a fraction of stop distance using exact broker round_trip charges.
+
+    Friction = (entry_price * slippage_pct * 2 * qty) + round_trip(entry_price, entry_price, qty)
+    Risk = abs(entry_price - stop_loss) * qty
+    Returns: friction / risk
+    """
+    if entry_price <= 0 or qty <= 0:
+        return float("inf")
+    stop_dist = abs(entry_price - stop_loss)
+    if stop_dist <= 0:
+        return float("inf")
+
+    from trading.config import SLIPPAGE_PCT
+    slip = slippage_pct if slippage_pct is not None else SLIPPAGE_PCT
+    slippage_cost = entry_price * slip * 2 * qty
+    statutory_charges = round_trip(entry_price, entry_price, qty)
+    total_friction = slippage_cost + statutory_charges
+    total_risk = stop_dist * qty
+    return total_friction / total_risk
+
+
+def check_cost_floor(
+    entry_price: float,
+    stop_loss: float,
+    qty: int = 1,
+    max_ratio: float | None = None,
+    slippage_pct: float | None = None,
+) -> tuple[bool, float]:
+    """Single shared gate check: is friction <= max_ratio of stop distance using round_trip() for actual quantity?
+
+    Returns:
+        (passed: bool, cost_risk_ratio: float)
+    """
+    from trading.config import MAX_COST_RISK_RATIO
+    limit = max_ratio if max_ratio is not None else MAX_COST_RISK_RATIO
+    ratio = compute_cost_risk_ratio(entry_price, stop_loss, qty=qty, slippage_pct=slippage_pct)
+    return (ratio <= limit), ratio
+
+
 if __name__ == "__main__":
     print(f"{'position':>12} {'qty':>5} {'charges':>9} {'as %':>7} {'breakeven move':>15}")
     for price, qty in [(1300, 6), (1300, 19), (1323, 151), (1300, 400)]:
