@@ -152,7 +152,7 @@ def serve(path: str, query: dict | None = None, *,
         refresh = query.get("refresh", ["0"])[0] == "1"
         body = json.dumps(CACHE.snapshot(refresh=refresh), default=str).encode()
         return 200, "application/json", body
-    if path in ("/api/quotes", "/api/fyers/quotes"):
+    if path in ("/api/quotes", "/api/fno/quotes", "/api/fyers/quotes"):
         from trading.fno.fyers import FyersClient
         client = FyersClient()
         syms_param = query.get("symbols", [None])[0]

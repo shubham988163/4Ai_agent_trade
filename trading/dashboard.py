@@ -264,6 +264,12 @@ def get_data(date: str | None) -> dict:
         "SELECT id, ts, agent, model, ok, error, "
         "substr(COALESCE(response,''),1,400) AS response "
         "FROM agent_log ORDER BY ts DESC LIMIT 50").fetchall()]
+
+    try:
+        candidates = [dict(r) for r in conn.execute(
+            "SELECT * FROM candidate_signals ORDER BY ts DESC LIMIT 50").fetchall()]
+    except Exception:
+        candidates = []
     conn.close()
 
     # Enrich open trades with real-time live market quotes and floating P&L
@@ -336,7 +342,7 @@ def get_data(date: str | None) -> dict:
         prov, model = "?", "?"
 
     return {"date": date, "dates": dates, "stats": stats, "trades": trades,
-            "rejections": rejections, "agent_log": agent_log,
+            "rejections": rejections, "candidates": candidates, "agent_log": agent_log,
             "day_config": day_config, "report": report,
             "provider": prov, "model": model,
             "retention_days": RETENTION_DAYS,
@@ -1022,6 +1028,11 @@ __TOPBAR__
   </section>
 
   <section class="panel">
+    <h2>Candidate signals &amp; Shadow P&amp;L <span class="sub">council audit &amp; hypothetical shadow resolution, last 50</span></h2>
+    <div class="scroll"><table id="cands"></table></div>
+  </section>
+
+  <section class="panel">
     <h2>LLM audit log <span class="sub">last 50 calls</span></h2>
     <div class="scroll"><table id="alog"></table></div>
   </section>
@@ -1240,7 +1251,11 @@ function render(){
   }
 
   renderTiles(d); renderChart(d); renderBreakdown(d); renderCfg(d);
-  renderTrades(d); renderRej(d); renderAlog(d);
+  renderTrades(d); renderRej(d); renderCands(d); renderAlog(d);
+  const modelBadge = document.getElementById("councilModelBadge");
+  if(modelBadge && d.model) {
+    modelBadge.textContent = "⚡ " + (d.provider === "gemini" ? "Gemini 3.5 Flash Lite" : d.model);
+  }
   const rep=document.getElementById("report");
   if(rep) {
     rep.textContent = d.report || "No journal report for this date yet — run: python -m trading.agents.eod_journal";
@@ -1412,7 +1427,50 @@ function renderRej(d){
     row.append(el("td",null,sig.symbol||"—"));
     row.append(el("td",null,sig.side||"—"));
     row.append(el("td","num",sig.qty!=null?String(sig.qty):"—"));
-    row.append(el("td","small",r.reason));
+    const reasonTd=el("td","small",r.reason);
+    if(r.reason.includes("cost_floor_breached") || r.reason.includes("trend_gate_failed")){
+      reasonTd.style.color = "var(--warn)";
+      reasonTd.style.fontWeight = "600";
+    }
+    row.append(reasonTd);
+    t.append(row);
+  });
+}
+
+function renderCands(d){
+  const t=document.getElementById("cands");
+  if(!t) return;
+  t.replaceChildren();
+  if(!d.candidates || !d.candidates.length){
+    t.append(el("caption","empty","No candidate signals logged yet. Candidate setups appear as the strategy evaluates signals."));
+    return;
+  }
+  const head=el("tr");
+  ["time","symbol","side","price","stop","target","trend","gate","council","conviction","executed / status","shadow P&L"].forEach(h=>head.append(el("th",null,h)));
+  t.append(head);
+  d.candidates.forEach(c=>{
+    const row=el("tr");
+    row.append(el("td","mono",t2stamp(c.ts)));
+    row.append(el("td",null,c.symbol));
+    row.append(el("td",null,c.side));
+    row.append(el("td","num",fmt(c.price)));
+    row.append(el("td","num",fmt(c.stop_loss)));
+    row.append(el("td","num",fmt(c.target)));
+    row.append(el("td","small",c.trend_state||"—"));
+    const gatePassed = c.gate_passed === 1 || c.gate_passed === true;
+    row.append(el("td",null,gatePassed?"✓ PASS":"✗ FAIL"));
+    row.append(el("td",null,verdictBadge(c.council_action ? c.council_action.toLowerCase() : null)));
+    row.append(el("td","num",c.council_conviction!=null?c.council_conviction+"/10":"—"));
+    row.append(el("td","small",c.executed ? "✓ Executed" : (c.rejection_reason || "HOLD / Rejected")));
+    const pnlTd=el("td","num");
+    if(c.shadow_pnl!=null){
+      const p = c.shadow_pnl;
+      pnlTd.className = "num " + (p >= 0 ? "pnl-pos" : "pnl-neg");
+      pnlTd.textContent = (p >= 0 ? "+" : "") + "₹" + fmt(p) + (c.shadow_status ? " (" + c.shadow_status + ")" : "");
+    } else {
+      pnlTd.textContent = c.shadow_status === "open" ? "● open" : "—";
+    }
+    row.append(pnlTd);
     t.append(row);
   });
 }
