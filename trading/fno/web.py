@@ -229,27 +229,31 @@ class Handler(BaseHTTPRequestHandler):
         self._send(*result)
 
     def do_POST(self):  # noqa: N802
-        url = urlparse(self.path)
-        length = int(self.headers.get("Content-Length", 0))
         try:
-            body = json.loads(self.rfile.read(length)) if length > 0 else {}
-        except Exception:
-            body = {}
+            url = urlparse(self.path)
+            length = int(self.headers.get("Content-Length", 0))
+            try:
+                body = json.loads(self.rfile.read(length)) if length > 0 else {}
+            except Exception:
+                body = {}
 
-        if url.path == "/api/trade":
-            from trading.dashboard import _handle_trade
-            res = _handle_trade(body)
-            self._send(200 if res.get("ok") else 400, "application/json", json.dumps(res).encode())
-        elif url.path == "/api/close":
-            from trading.dashboard import _handle_close
-            res = _handle_close(body)
-            self._send(200 if res.get("ok") else 400, "application/json", json.dumps(res).encode())
-        elif url.path == "/api/ai-scan":
-            from trading.dashboard import _handle_ai_scan
-            res = _handle_ai_scan(body)
-            self._send(200 if res.get("ok") else 400, "application/json", json.dumps(res).encode())
-        else:
-            self._send(404, "text/plain", b"not found")
+            if url.path == "/api/trade":
+                from trading.dashboard import _handle_trade
+                res = _handle_trade(body)
+                self._send(200 if res.get("ok") else 400, "application/json", json.dumps(res, default=str).encode())
+            elif url.path == "/api/close":
+                from trading.dashboard import _handle_close
+                res = _handle_close(body)
+                self._send(200 if res.get("ok") else 400, "application/json", json.dumps(res, default=str).encode())
+            elif url.path in ("/api/ai-scan", "/api/agents/scan"):
+                from trading.dashboard import _handle_ai_scan
+                res = _handle_ai_scan(body)
+                self._send(200 if res.get("ok") else 400, "application/json", json.dumps(res, default=str).encode())
+            else:
+                self._send(404, "text/plain", b"not found")
+        except Exception as exc:
+            err = {"ok": False, "error": f"Internal server error: {exc}"}
+            self._send(500, "application/json", json.dumps(err, default=str).encode())
 
     def _send(self, code: int, ctype: str, body: bytes):
         self.send_response(code)

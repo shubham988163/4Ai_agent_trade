@@ -156,6 +156,35 @@ def _handle_close(data: dict) -> dict:
     return {"ok": True, "trade_id": trade_id, "exit_price": round(exit_price, 2), "pnl": round(pnl, 2)}
 
 
+def _clean_context(ctx: dict | None) -> dict:
+    if not ctx:
+        return {}
+    out = {}
+    for k, v in ctx.items():
+        if k == "facts":
+            if hasattr(v, "model_dump"):
+                out[k] = v.model_dump()
+            elif hasattr(v, "to_json"):
+                try:
+                    out[k] = json.loads(v.to_json())
+                except Exception:
+                    out[k] = str(v)
+            else:
+                out[k] = str(v)
+        elif k == "signal" and v is not None:
+            if hasattr(v, "as_dict"):
+                out[k] = v.as_dict()
+            elif hasattr(v, "__dict__"):
+                out[k] = {sk: sv for sk, sv in v.__dict__.items() if not sk.startswith("_")}
+            else:
+                out[k] = str(v)
+        elif hasattr(v, "model_dump"):
+            out[k] = v.model_dump()
+        else:
+            out[k] = v
+    return out
+
+
 def _handle_ai_scan(data: dict) -> dict:
     sym = str(data.get("symbol", "SBIN")).strip().upper()
     try:
@@ -171,7 +200,7 @@ def _handle_ai_scan(data: dict) -> dict:
                 return {
                     "ok": True,
                     "symbol": sym,
-                    "context": ctx or {},
+                    "context": _clean_context(ctx),
                     "recommendation": {
                         "symbol": sym,
                         "action": "HOLD",
@@ -202,8 +231,8 @@ def _handle_ai_scan(data: dict) -> dict:
         return {
             "ok": True,
             "symbol": sym,
-            "context": ctx or {},
-            "recommendation": rec.model_dump(),
+            "context": _clean_context(ctx),
+            "recommendation": rec.model_dump() if hasattr(rec, "model_dump") else rec,
             "execution": res,
         }
     except Exception as e:
@@ -2060,33 +2089,37 @@ class Handler(BaseHTTPRequestHandler):
             self._send(404, "text/plain", b"not found")
 
     def do_POST(self):  # noqa: N802
-        url = urlparse(self.path)
-        length = int(self.headers.get("Content-Length", 0))
         try:
-            body = json.loads(self.rfile.read(length)) if length > 0 else {}
-        except Exception:
-            body = {}
+            url = urlparse(self.path)
+            length = int(self.headers.get("Content-Length", 0))
+            try:
+                body = json.loads(self.rfile.read(length)) if length > 0 else {}
+            except Exception:
+                body = {}
 
-        if url.path in ("/api/ai-scan", "/api/agents/scan"):
-            res = _handle_ai_scan(body)
-            self._send(200 if res.get("ok") else 400, "application/json", json.dumps(res).encode())
-        elif url.path == "/api/agents/premarket":
-            res = _handle_premarket_run()
-            self._send(200 if res.get("ok") else 400, "application/json", json.dumps(res).encode())
-        elif url.path == "/api/agents/supervisor":
-            res = _handle_supervisor_run()
-            self._send(200 if res.get("ok") else 400, "application/json", json.dumps(res).encode())
-        elif url.path == "/api/agents/journal":
-            res = _handle_journal_run(body)
-            self._send(200 if res.get("ok") else 400, "application/json", json.dumps(res).encode())
-        elif url.path == "/api/trade":
-            res = _handle_trade(body)
-            self._send(200 if res.get("ok") else 400, "application/json", json.dumps(res).encode())
-        elif url.path == "/api/close":
-            res = _handle_close(body)
-            self._send(200 if res.get("ok") else 400, "application/json", json.dumps(res).encode())
-        else:
-            self._send(404, "text/plain", b"not found")
+            if url.path in ("/api/ai-scan", "/api/agents/scan"):
+                res = _handle_ai_scan(body)
+                self._send(200 if res.get("ok") else 400, "application/json", json.dumps(res, default=str).encode())
+            elif url.path == "/api/agents/premarket":
+                res = _handle_premarket_run()
+                self._send(200 if res.get("ok") else 400, "application/json", json.dumps(res, default=str).encode())
+            elif url.path == "/api/agents/supervisor":
+                res = _handle_supervisor_run()
+                self._send(200 if res.get("ok") else 400, "application/json", json.dumps(res, default=str).encode())
+            elif url.path == "/api/agents/journal":
+                res = _handle_journal_run(body)
+                self._send(200 if res.get("ok") else 400, "application/json", json.dumps(res, default=str).encode())
+            elif url.path == "/api/trade":
+                res = _handle_trade(body)
+                self._send(200 if res.get("ok") else 400, "application/json", json.dumps(res, default=str).encode())
+            elif url.path == "/api/close":
+                res = _handle_close(body)
+                self._send(200 if res.get("ok") else 400, "application/json", json.dumps(res, default=str).encode())
+            else:
+                self._send(404, "text/plain", b"not found")
+        except Exception as exc:
+            err = {"ok": False, "error": f"Internal server error: {exc}"}
+            self._send(500, "application/json", json.dumps(err, default=str).encode())
 
     def _send(self, code: int, ctype: str, body: bytes):
         self.send_response(code)
