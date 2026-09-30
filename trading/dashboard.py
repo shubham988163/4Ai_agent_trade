@@ -438,7 +438,9 @@ def get_data(date: str | None) -> dict:
 
         for t in list(open_trades):
             sym = t.get("symbol", "")
-            ltp = ltp_map.get(sym) or t.get("entry_price") or 0.0
+            real_ltp = ltp_map.get(sym)
+            has_real_quote = (real_ltp is not None and real_ltp > 0)
+            ltp = real_ltp if has_real_quote else (t.get("entry_price") or 0.0)
             t["current_price"] = round(ltp, 2)
             entry = float(t.get("entry_price") or 0.0)
             qty = int(t.get("qty") or 1)
@@ -466,14 +468,14 @@ def get_data(date: str | None) -> dict:
             t["est_charges"] = round(est_charges, 2)
             t["net_unrealized_pnl"] = round(pnl - est_charges, 2)
 
-            # Trailing stop loss logic
+            # Trailing stop loss logic (only advance when live market quote exists)
             trade_id = t["id"]
             risk_per_share = abs(entry - initial_sl)
             if risk_per_share <= 0.001:
                 risk_per_share = max(entry * 0.01, 1.0)
 
             st = _TRAIL_STATES.get(trade_id, TrailState())
-            if trail_cfg.enabled and ltp > 0:
+            if trail_cfg.enabled and has_real_quote:
                 new_sl, new_st, _ = update_exit(
                     entry=entry,
                     side=side,
@@ -506,19 +508,33 @@ def get_data(date: str | None) -> dict:
             t["is_trailed_above_be"] = is_trailed_above_be
             t["trail_armed"] = _TRAIL_STATES.get(trade_id, TrailState()).armed
 
-            # Auto-exit if trailing stop loss or profit target reached for active session
+            # Auto-exit: ONLY execute if we have a genuine live quote from the exchange feed
             is_today = (t.get("date") == today)
             stop_hit = (side == "BUY" and ltp <= current_sl and current_sl > 0) or (side == "SELL" and ltp >= current_sl and current_sl > 0)
             target_hit = (side == "BUY" and target > 0 and ltp >= target) or (side == "SELL" and target > 0 and ltp <= target)
 
-            if AUTO_EXIT_ON_STOP and is_today and (stop_hit or target_hit) and ltp > 0:
-                exit_price = round(ltp, 2)
+            if AUTO_EXIT_ON_STOP and is_today and has_real_quote and (stop_hit or target_hit):
+                # When a resting stop order is breached, it executes at the stop price (adjusted for slippage),
+                # or at the gap price if market gapped through it.
+                from trading.config import SLIPPAGE_PCT
+                if target_hit:
+                    fill = target * (1 - SLIPPAGE_PCT) if side == "BUY" else target * (1 + SLIPPAGE_PCT)
+                    exit_price = round(fill, 2)
+                    exit_reason = "target_reached"
+                else:
+                    fill = current_sl * (1 - SLIPPAGE_PCT) if side == "BUY" else current_sl * (1 + SLIPPAGE_PCT)
+                    # Use ltp if price gapped severely past stop
+                    if side == "BUY":
+                        exit_price = min(round(fill, 2), round(ltp, 2))
+                    else:
+                        exit_price = max(round(fill, 2), round(ltp, 2))
+                    exit_reason = "trailing_stop_hit" if is_be_protected else "stop_loss_hit"
+
                 if is_opt:
                     charges = options_round_trip(entry, exit_price, qty)
                 else:
                     charges = round_trip_charges(entry, exit_price, qty)
                 closed_pnl = ledger.record_exit(trade_id, exit_price, charges=round(charges, 2))
-                exit_reason = "target_reached" if target_hit else ("trailing_stop_hit" if is_be_protected else "stop_loss_hit")
 
                 t["status"] = "closed"
                 t["exit_price"] = exit_price
