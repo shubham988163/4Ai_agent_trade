@@ -1583,8 +1583,8 @@ function renderTrades(d){
   t.replaceChildren();
   if(!d.trades.length){ t.append(el("caption","empty","No trades for this date.")); return; }
   const head=el("tr");
-  ["#","time","symbol","side","qty","entry","SL / Trailed","exit / live LTP","P&L (realized / live)","charges","strategy","verdict","reasons"]
-    .forEach((h,i)=>{const th=el("th",[4,5,6,7,8,9].includes(i)?"num":null,h); head.append(th);});
+  ["#","time","symbol","side","qty","entry","SL","trailed SL","exit at","P&L (realized / live)","charges","strategy","verdict","reasons"]
+    .forEach((h,i)=>{const th=el("th",[4,5,6,7,8,9,10].includes(i)?"num":null,h); head.append(th);});
   t.append(head);
   d.trades.forEach(tr=>{
     const row=el("tr");
@@ -1595,26 +1595,40 @@ function renderTrades(d){
     row.append(el("td","num",String(tr.qty)));
     row.append(el("td","num",fmt(tr.entry_price)));
 
+    // 1. Initial Structural Stop Loss (SL)
+    const initialSlVal = tr.initial_stop != null ? tr.initial_stop : tr.stop_loss;
     const slTd = el("td","num");
-    const slVal = tr.stop_loss != null ? tr.stop_loss : tr.initial_stop;
+    slTd.innerHTML = initialSlVal != null
+      ? `<span style="font-family:ui-monospace,monospace;font-size:11.5px;color:var(--ink-2);font-weight:600">₹${fmt(initialSlVal)}</span>`
+      : `<span class="muted">—</span>`;
+    row.append(slTd);
+
+    // 2. Dynamic Trailed Stop Loss (trailed SL)
+    const trailTd = el("td","num");
+    const currentSl = tr.stop_loss != null ? tr.stop_loss : initialSlVal;
     if(tr.status === "open"){
       const wrap = el("div");
       wrap.style.cssText = "display:flex;flex-direction:column;align-items:flex-end;gap:2px";
       if(tr.is_trailed_above_be){
-        wrap.innerHTML = `<span class="badge sm bull" style="font-family:ui-monospace,monospace;font-size:10px;font-weight:700;padding:2px 6px" title="Trailed SL locking in gains">🚀 ₹${fmt(slVal)}</span><span style="font-size:8.5px;color:var(--up);font-weight:600">Locked Gain</span>`;
+        wrap.innerHTML = `<span class="badge sm bull" style="font-family:ui-monospace,monospace;font-size:10px;font-weight:700;padding:2px 6px" title="Trailed SL locking in gains">🚀 ₹${fmt(currentSl)}</span><span style="font-size:8.5px;color:var(--up);font-weight:600">Locked Gain</span>`;
       } else if(tr.is_breakeven_protected){
-        wrap.innerHTML = `<span class="badge sm" style="font-family:ui-monospace,monospace;font-size:10px;font-weight:700;padding:2px 6px;background:rgba(46,189,133,0.15);border-color:rgba(46,189,133,0.4);color:var(--up)" title="Breakeven Protected: Covers all statutory charges + slippage. Net profit cannot go negative.">🛡️ BE: ₹${fmt(slVal)}</span><span style="font-size:8.5px;color:var(--up);font-weight:600">Zero Loss</span>`;
-      } else if(slVal != null){
-        wrap.innerHTML = `<span style="font-family:ui-monospace,monospace;font-size:11px;font-weight:600;color:var(--ink-2)">₹${fmt(slVal)}</span><span style="font-size:8.5px;color:var(--ink-3)">Initial Stop</span>`;
+        wrap.innerHTML = `<span class="badge sm" style="font-family:ui-monospace,monospace;font-size:10px;font-weight:700;padding:2px 6px;background:rgba(46,189,133,0.15);border-color:rgba(46,189,133,0.4);color:var(--up)" title="Breakeven Protected: Covers all statutory charges + slippage. Net profit cannot go negative.">🛡️ BE: ₹${fmt(currentSl)}</span><span style="font-size:8.5px;color:var(--up);font-weight:600">Zero Loss</span>`;
+      } else if(currentSl != null && initialSlVal != null && Math.abs(currentSl - initialSlVal) > 0.01){
+        wrap.innerHTML = `<span style="font-family:ui-monospace,monospace;font-size:11px;font-weight:600;color:var(--ink)">₹${fmt(currentSl)}</span>`;
       } else {
-        wrap.innerHTML = `<span class="muted">—</span>`;
+        wrap.innerHTML = `<span class="muted" style="font-size:10.5px" title="Awaiting arming condition">awaiting arm</span>`;
       }
-      slTd.append(wrap);
+      trailTd.append(wrap);
     } else {
-      slTd.innerHTML = slVal != null ? `<span style="font-family:ui-monospace,monospace;font-size:11px;color:var(--ink-3)">₹${fmt(slVal)}</span>` : `<span class="muted">—</span>`;
+      if(tr.exit_reason === "trailing_stop_hit"){
+        trailTd.innerHTML = `<span class="badge sm" style="font-size:9.5px;padding:2px 6px;background:rgba(46,189,133,0.15);color:var(--up);border-color:rgba(46,189,133,0.3)">🛡️ ₹${fmt(currentSl)}</span>`;
+      } else {
+        trailTd.innerHTML = currentSl != null ? `<span style="font-family:ui-monospace,monospace;font-size:11px;color:var(--ink-3)">₹${fmt(currentSl)}</span>` : `<span class="muted">—</span>`;
+      }
     }
-    row.append(slTd);
+    row.append(trailTd);
 
+    // 3. Exit at / Live LTP
     const isClosed = tr.status === "closed" && tr.exit_price != null;
     const exitTd = el("td","num");
     if(isClosed){

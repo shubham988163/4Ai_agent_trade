@@ -95,6 +95,8 @@ MAX_COST_RISK_RATIO = 0.30      # Max friction as a fraction of risk (30%)
 # --- Exit management: deterministic trailing stop ---
 TRAIL_ENABLED = True             # Enabled: trailing stop moves to breakeven & trails to protect profit
 BREAKEVEN_AT_R = 1.0            # favourable excursion (in R) that moves the stop to breakeven
+OPTION_BREAKEVEN_AT_R = 0.4     # for options: arm breakeven at 0.4R (since option stops are wide)
+OPTION_BREAKEVEN_PCT = 0.08     # for options: arm breakeven at +8% gain
 TRAIL_ATR_MULT = 2.0            # chandelier trail distance in ATR(14) units
 PARTIAL_AT_R = 1.5              # R multiple that triggers partial booking (None disables)
 PARTIAL_PCT = 0.5               # fraction of the position booked at the partial
