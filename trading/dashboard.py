@@ -1599,8 +1599,8 @@ function renderTrades(d){
   t.replaceChildren();
   if(!d.trades.length){ t.append(el("caption","empty","No trades for this date.")); return; }
   const head=el("tr");
-  ["#","time","symbol","side","qty","entry","SL","trailed SL","exit at","P&L (realized / live)","charges","strategy","verdict","reasons"]
-    .forEach((h,i)=>{const th=el("th",[4,5,6,7,8,9,10].includes(i)?"num":null,h); head.append(th);});
+  ["#","time","symbol","side","current price","qty","entry","SL","trailed SL","exit at","P&L (realized / live)","charges","strategy","verdict","reasons"]
+    .forEach((h,i)=>{const th=el("th",[4,5,6,7,8,9,10,11].includes(i)?"num":null,h); head.append(th);});
   t.append(head);
   d.trades.forEach(tr=>{
     const row=el("tr");
@@ -1608,6 +1608,19 @@ function renderTrades(d){
     row.append(el("td","mono",t2time(tr.ts)));
     row.append(el("td",null,tr.symbol));
     row.append(el("td",null,tr.side));
+
+    // Current Price Column
+    const curPriceTd = el("td","num");
+    if(tr.status === "open"){
+      const ltpVal = tr.current_price != null ? tr.current_price : tr.entry_price;
+      const ltpPill = el("span","badge sm live-pulse", "₹" + fmt(ltpVal));
+      ltpPill.style.cssText = "font-family:ui-monospace,monospace;font-weight:700;padding:2px 7px;border-color:color-mix(in srgb,var(--accent) 55%,var(--line));color:var(--ink);background:var(--cell-2)";
+      curPriceTd.append(ltpPill);
+    } else {
+      curPriceTd.innerHTML = `<span class="muted" style="font-size:11px">—</span>`;
+    }
+    row.append(curPriceTd);
+
     row.append(el("td","num",String(tr.qty)));
     row.append(el("td","num",fmt(tr.entry_price)));
 
@@ -1644,7 +1657,7 @@ function renderTrades(d){
     }
     row.append(trailTd);
 
-    // 3. Exit at / Live LTP
+    // 3. Exit at
     const isClosed = tr.status === "closed" && tr.exit_price != null;
     const exitTd = el("td","num");
     if(isClosed){
@@ -1661,14 +1674,9 @@ function renderTrades(d){
       wrap.innerHTML = `<span style="font-family:ui-monospace,monospace;font-weight:700">₹${fmt(tr.exit_price)}</span>${exitBadge}`;
       exitTd.append(wrap);
     } else {
-      const wrap = el("div");
-      wrap.style.cssText = "display:flex;align-items:center;justify-content:flex-end;gap:6px";
-      const ltpVal = tr.current_price != null ? tr.current_price : tr.entry_price;
-      const ltpPill = el("span","badge sm live-pulse", "₹" + fmt(ltpVal));
-      ltpPill.style.cssText = "font-family:ui-monospace,monospace;font-weight:700;padding:2px 6px;border-color:color-mix(in srgb,var(--accent) 55%,var(--line));color:var(--ink);background:var(--cell-2)";
       const cBtn = el("button","btn sm","Close");
-      cBtn.style.padding = "2px 6px";
-      cBtn.style.fontSize = "10.5px";
+      cBtn.style.padding = "3px 8px";
+      cBtn.style.fontSize = "11px";
       cBtn.onclick = async ()=>{
         cBtn.disabled = true;
         cBtn.textContent = "Closing…";
@@ -1682,8 +1690,7 @@ function renderTrades(d){
           if(j.ok){ load(); } else { alert(j.error || "Failed to close trade"); cBtn.disabled=false; cBtn.textContent="Close"; }
         }catch(e){ alert("Error: "+e); cBtn.disabled=false; cBtn.textContent="Close"; }
       };
-      wrap.append(ltpPill, cBtn);
-      exitTd.append(wrap);
+      exitTd.append(cBtn);
     }
     row.append(exitTd);
 
