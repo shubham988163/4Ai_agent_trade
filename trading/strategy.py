@@ -546,10 +546,11 @@ class Engine:
         if trail_config.enabled:
             risk_per_share = abs(pos["entry"] - pos.get("initial_sl", pos["sl"]))
             pos.setdefault("trail", TrailState())
+            is_opt = ("CE" in symbol or "PE" in symbol or "OPT" in symbol)
             new_sl, pos["trail"], partial_qty = update_exit(
                 pos["entry"], pos["side"], pos["sl"], float(bar["Close"]), float(atr or 0.0),
                 pos["trail"], qty=pos["qty"], risk_per_share=risk_per_share,
-                config=trail_config,
+                config=trail_config, is_option=is_opt,
             )
             if new_sl != pos["sl"]:
                 pos["sl"] = new_sl
@@ -601,7 +602,12 @@ class Engine:
             "strategy_id": self.strat["id"], "regime": self.router.day_config.get("regime"),
         }
         child_id = self.ledger.record_entry(child_signal, pos["entry"])
-        charges = round_trip_charges(pos["entry"], price, partial_qty)
+        is_opt = ("CE" in symbol or "PE" in symbol or "OPT" in symbol)
+        if is_opt:
+            from trading.costs import options_round_trip
+            charges = options_round_trip(pos["entry"], price, partial_qty)
+        else:
+            charges = round_trip_charges(pos["entry"], price, partial_qty)
         pnl = self.ledger.record_exit(child_id, round(price, 2), charges=round(charges, 2))
         self.ledger.reduce_open_qty(pos["trade_id"], pos["qty"] - partial_qty)
         pos["qty"] -= partial_qty
@@ -615,7 +621,12 @@ class Engine:
         # Itemised Zerodha charges, not a flat percentage: brokerage is capped
         # at Rs 20/order, so the flat model overstated costs by ~2x once
         # position sizes reached Rs 2L (and by ~13% at the old Rs 25k sizes).
-        charges = round_trip_charges(pos["entry"], exit_price, pos["qty"])
+        is_opt = ("CE" in symbol or "PE" in symbol or "OPT" in symbol)
+        if is_opt:
+            from trading.costs import options_round_trip
+            charges = options_round_trip(pos["entry"], exit_price, pos["qty"])
+        else:
+            charges = round_trip_charges(pos["entry"], exit_price, pos["qty"])
         pnl = self.ledger.record_exit(pos["trade_id"], round(exit_price, 2),
                                       charges=round(charges, 2),
                                       mae=round(pos["mae"], 2), mfe=round(pos["mfe"], 2))

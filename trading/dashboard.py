@@ -25,13 +25,29 @@ from zoneinfo import ZoneInfo
 import yfinance as yf
 
 from trading import ui_theme
-from trading.config import (DB_PATH, REPORTS_DIR, RETENTION_DAYS, TODAY_CONFIG_PATH)
+from trading.config import (
+    AUTO_EXIT_ON_STOP,
+    DB_PATH,
+    REPORTS_DIR,
+    RETENTION_DAYS,
+    TODAY_CONFIG_PATH,
+    TRAIL_ENABLED,
+)
 from trading.costs import round_trip as round_trip_charges
 from trading.execution_router import ExecutionRouter
+from trading.exits import (
+    TrailState,
+    breakeven_buffer,
+    trail_config_from_settings,
+    update_exit,
+)
 from trading.fno import fyers, web as fno_web
 from trading.ledger import Ledger
 
 IST = ZoneInfo("Asia/Kolkata")
+
+# Per-trade trailing stop accumulators kept across live data polling cycles
+_TRAIL_STATES: dict[int, TrailState] = {}
 
 
 def _get_batch_ltp(symbols: list[str]) -> dict[str, float]:
@@ -413,35 +429,107 @@ def get_data(date: str | None) -> dict:
         candidates = []
     conn.close()
 
-    # Enrich open trades with real-time live market quotes and floating P&L
+    # Enrich open trades with real-time live market quotes, trailing stop updates, and floating P&L
     open_trades = [t for t in trades if t["status"] == "open"]
     if open_trades:
         syms = list({t["symbol"] for t in open_trades if t.get("symbol")})
         ltp_map = _get_batch_ltp(syms)
-        for t in open_trades:
+        trail_cfg = trail_config_from_settings()
+
+        for t in list(open_trades):
             sym = t.get("symbol", "")
             ltp = ltp_map.get(sym) or t.get("entry_price") or 0.0
             t["current_price"] = round(ltp, 2)
             entry = float(t.get("entry_price") or 0.0)
             qty = int(t.get("qty") or 1)
             side = str(t.get("side", "BUY")).upper()
+            target = float(t.get("target") or 0.0)
+            current_sl = float(t.get("stop_loss") or 0.0)
+            initial_sl = float(t.get("initial_stop") or current_sl or 0.0)
+            is_opt = ("CE" in sym or "PE" in sym or "OPT" in sym or t.get("instrument_type") == "option")
+
             if side == "BUY":
                 pnl = (ltp - entry) * qty
                 pnl_pct = ((ltp - entry) / entry * 100) if entry else 0.0
             else:
                 pnl = (entry - ltp) * qty
                 pnl_pct = ((entry - ltp) / entry * 100) if entry else 0.0
-            is_opt = ("CE" in sym or "PE" in sym or "OPT" in sym)
+
             if is_opt:
                 from trading.costs import options_round_trip
                 est_charges = options_round_trip(entry, ltp, qty)
             else:
                 est_charges = round_trip_charges(entry, ltp, qty)
+
             t["unrealized_pnl"] = round(pnl, 2)
             t["pnl_pct"] = round(pnl_pct, 2)
             t["est_charges"] = round(est_charges, 2)
             t["net_unrealized_pnl"] = round(pnl - est_charges, 2)
 
+            # Trailing stop loss logic
+            trade_id = t["id"]
+            risk_per_share = abs(entry - initial_sl)
+            if risk_per_share <= 0.001:
+                risk_per_share = max(entry * 0.01, 1.0)
+
+            st = _TRAIL_STATES.get(trade_id, TrailState())
+            if trail_cfg.enabled and ltp > 0:
+                new_sl, new_st, _ = update_exit(
+                    entry=entry,
+                    side=side,
+                    current_stop=current_sl,
+                    bar_close=ltp,
+                    atr=0.0,
+                    state=st,
+                    qty=qty,
+                    risk_per_share=risk_per_share,
+                    config=trail_cfg,
+                    is_option=is_opt,
+                )
+                _TRAIL_STATES[trade_id] = new_st
+
+                # Monotonic ratchet: advance in SQLite ledger if tightened
+                if (side == "BUY" and new_sl > current_sl) or (side == "SELL" and new_sl < current_sl):
+                    ledger.update_open_stop(trade_id, round(new_sl, 2))
+                    current_sl = round(new_sl, 2)
+                    t["stop_loss"] = current_sl
+
+            be_buf = breakeven_buffer(entry, qty, trail_cfg.slippage_pct, is_option=is_opt)
+            be_level = (entry + be_buf) if side == "BUY" else (entry - be_buf)
+            is_be_protected = (side == "BUY" and current_sl >= be_level - 1e-4) or (side == "SELL" and current_sl <= be_level + 1e-4)
+            is_trailed_above_be = (side == "BUY" and current_sl > be_level + 1e-4) or (side == "SELL" and current_sl < be_level - 1e-4)
+
+            t["stop_loss"] = round(current_sl, 2)
+            t["initial_stop"] = round(initial_sl, 2)
+            t["breakeven_level"] = round(be_level, 2)
+            t["is_breakeven_protected"] = is_be_protected
+            t["is_trailed_above_be"] = is_trailed_above_be
+            t["trail_armed"] = _TRAIL_STATES.get(trade_id, TrailState()).armed
+
+            # Auto-exit if trailing stop loss or profit target reached for active session
+            is_today = (t.get("date") == today)
+            stop_hit = (side == "BUY" and ltp <= current_sl and current_sl > 0) or (side == "SELL" and ltp >= current_sl and current_sl > 0)
+            target_hit = (side == "BUY" and target > 0 and ltp >= target) or (side == "SELL" and target > 0 and ltp <= target)
+
+            if AUTO_EXIT_ON_STOP and is_today and (stop_hit or target_hit) and ltp > 0:
+                exit_price = round(ltp, 2)
+                if is_opt:
+                    charges = options_round_trip(entry, exit_price, qty)
+                else:
+                    charges = round_trip_charges(entry, exit_price, qty)
+                closed_pnl = ledger.record_exit(trade_id, exit_price, charges=round(charges, 2))
+                exit_reason = "target_reached" if target_hit else ("trailing_stop_hit" if is_be_protected else "stop_loss_hit")
+
+                t["status"] = "closed"
+                t["exit_price"] = exit_price
+                t["exit_ts"] = time.time()
+                t["pnl"] = round(closed_pnl, 2)
+                t["charges"] = round(charges, 2)
+                t["exit_reason"] = exit_reason
+                if trade_id in _TRAIL_STATES:
+                    del _TRAIL_STATES[trade_id]
+
+    open_trades = [t for t in trades if t["status"] == "open"]
     closed = [t for t in trades if t["status"] == "closed"]
     wins = [t for t in closed if (t["pnl"] or 0) > 0]
 
@@ -494,6 +582,12 @@ def get_data(date: str | None) -> dict:
             "retention_days": RETENTION_DAYS,
             "side_report": _breakdown(trades, "side"),
             "strategy_report": _breakdown(trades, "strategy_id"),
+            "trail_config": {
+                "enabled": TRAIL_ENABLED,
+                "breakeven_at_r": 1.0,
+                "trail_atr_mult": 2.0,
+                "auto_exit_on_stop": AUTO_EXIT_ON_STOP,
+            },
             "day_pnl_all_time": ledger.day_realized_pnl(date) if date else 0}
 
 
@@ -1447,9 +1541,13 @@ function renderTiles(d){
   });
 
   if(s.open > 0){
+    const beCount = (d.trades||[]).filter(x=>x.status==="open" && x.is_breakeven_protected).length;
+    const trailSub = beCount > 0
+      ? `🛡️ ${beCount}/${s.open} trade${s.open>1?'s':''} Breakeven Protected (Zero Loss)`
+      : `across ${s.open} active open trade${s.open>1?'s':''} (Trailing SL armed at 1.0R)`;
     mk("Live Floating P&L", (unp>=0?"+":"")+fmt(unp), {
       dir:unp>=0?"up":"down",
-      delta:`across ${s.open} active open trade${s.open>1?'s':''}`
+      delta:trailSub
     });
   }
 
@@ -1485,8 +1583,8 @@ function renderTrades(d){
   t.replaceChildren();
   if(!d.trades.length){ t.append(el("caption","empty","No trades for this date.")); return; }
   const head=el("tr");
-  ["#","time","symbol","side","qty","entry","exit / live LTP","P&L (realized / live)","charges","strategy","verdict","reasons"]
-    .forEach((h,i)=>{const th=el("th",[4,5,6,7,8].includes(i)?"num":null,h); head.append(th);});
+  ["#","time","symbol","side","qty","entry","SL / Trailed","exit / live LTP","P&L (realized / live)","charges","strategy","verdict","reasons"]
+    .forEach((h,i)=>{const th=el("th",[4,5,6,7,8,9].includes(i)?"num":null,h); head.append(th);});
   t.append(head);
   d.trades.forEach(tr=>{
     const row=el("tr");
@@ -1496,10 +1594,42 @@ function renderTrades(d){
     row.append(el("td",null,tr.side));
     row.append(el("td","num",String(tr.qty)));
     row.append(el("td","num",fmt(tr.entry_price)));
+
+    const slTd = el("td","num");
+    const slVal = tr.stop_loss != null ? tr.stop_loss : tr.initial_stop;
+    if(tr.status === "open"){
+      const wrap = el("div");
+      wrap.style.cssText = "display:flex;flex-direction:column;align-items:flex-end;gap:2px";
+      if(tr.is_trailed_above_be){
+        wrap.innerHTML = `<span class="badge sm bull" style="font-family:ui-monospace,monospace;font-size:10px;font-weight:700;padding:2px 6px" title="Trailed SL locking in gains">🚀 ₹${fmt(slVal)}</span><span style="font-size:8.5px;color:var(--up);font-weight:600">Locked Gain</span>`;
+      } else if(tr.is_breakeven_protected){
+        wrap.innerHTML = `<span class="badge sm" style="font-family:ui-monospace,monospace;font-size:10px;font-weight:700;padding:2px 6px;background:rgba(46,189,133,0.15);border-color:rgba(46,189,133,0.4);color:var(--up)" title="Breakeven Protected: Covers all statutory charges + slippage. Net profit cannot go negative.">🛡️ BE: ₹${fmt(slVal)}</span><span style="font-size:8.5px;color:var(--up);font-weight:600">Zero Loss</span>`;
+      } else if(slVal != null){
+        wrap.innerHTML = `<span style="font-family:ui-monospace,monospace;font-size:11px;font-weight:600;color:var(--ink-2)">₹${fmt(slVal)}</span><span style="font-size:8.5px;color:var(--ink-3)">Initial Stop</span>`;
+      } else {
+        wrap.innerHTML = `<span class="muted">—</span>`;
+      }
+      slTd.append(wrap);
+    } else {
+      slTd.innerHTML = slVal != null ? `<span style="font-family:ui-monospace,monospace;font-size:11px;color:var(--ink-3)">₹${fmt(slVal)}</span>` : `<span class="muted">—</span>`;
+    }
+    row.append(slTd);
+
     const isClosed = tr.status === "closed" && tr.exit_price != null;
     const exitTd = el("td","num");
     if(isClosed){
-      exitTd.textContent = fmt(tr.exit_price);
+      const wrap = el("div");
+      wrap.style.cssText = "display:flex;flex-direction:column;align-items:flex-end;gap:2px";
+      let exitBadge = "";
+      if(tr.exit_reason === "trailing_stop_hit"){
+        exitBadge = `<span class="badge sm" style="font-size:8.5px;padding:1px 5px;background:rgba(46,189,133,0.15);color:var(--up);border-color:rgba(46,189,133,0.3)">🛡️ Trailed SL Exit</span>`;
+      } else if(tr.exit_reason === "target_reached"){
+        exitBadge = `<span class="badge sm bull" style="font-size:8.5px;padding:1px 5px">🎯 Target Hit</span>`;
+      } else if(tr.exit_reason === "stop_loss_hit"){
+        exitBadge = `<span class="badge sm bear" style="font-size:8.5px;padding:1px 5px">🛑 SL Hit</span>`;
+      }
+      wrap.innerHTML = `<span style="font-family:ui-monospace,monospace;font-weight:700">₹${fmt(tr.exit_price)}</span>${exitBadge}`;
+      exitTd.append(wrap);
     } else {
       const wrap = el("div");
       wrap.style.cssText = "display:flex;align-items:center;justify-content:flex-end;gap:6px";

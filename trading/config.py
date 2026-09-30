@@ -93,14 +93,12 @@ CHARGES_PCT_ROUND_TRIP = 0.0006
 MAX_COST_RISK_RATIO = 0.30      # Max friction as a fraction of risk (30%)
 
 # --- Exit management: deterministic trailing stop ---
-# Default OFF: trailing changes exit behaviour everywhere it is wired in (shadow
-# resolution, research harness, backtest engine, live paper loop), so it stays opt-in
-# until the harness shows what it does to expectancy. See trading/exits.py.
-TRAIL_ENABLED = False
+TRAIL_ENABLED = True             # Enabled: trailing stop moves to breakeven & trails to protect profit
 BREAKEVEN_AT_R = 1.0            # favourable excursion (in R) that moves the stop to breakeven
 TRAIL_ATR_MULT = 2.0            # chandelier trail distance in ATR(14) units
 PARTIAL_AT_R = 1.5              # R multiple that triggers partial booking (None disables)
 PARTIAL_PCT = 0.5               # fraction of the position booked at the partial
+AUTO_EXIT_ON_STOP = True        # Automatically close open positions when trailing stop or target is hit
 
 # --- AI agent ---
 # Provider is auto-selected in trading/agents/llm.py: Gemini when

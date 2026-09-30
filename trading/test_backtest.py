@@ -76,9 +76,11 @@ def rising(n: int = 20, slope: float = 2.0) -> list[float]:
 
 
 def bt(strategy: str = "ema", **kw) -> Backtester:
+    from trading.exits import TrailConfig
     kw.setdefault("slippage", 0.0)
     kw.setdefault("charges", 0.0)
     kw.setdefault("risk_per_trade", 500.0)
+    kw.setdefault("trail_config", TrailConfig(enabled=False))
     return Backtester(build_strategy(strategy), **kw)
 
 

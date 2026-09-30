@@ -100,12 +100,17 @@ def trail_config_from_settings(**overrides) -> TrailConfig:
     return TrailConfig(**base)
 
 
-def breakeven_buffer(entry: float, qty: int, slippage_pct: float | None = None) -> float:
+def breakeven_buffer(
+    entry: float,
+    qty: int,
+    slippage_pct: float | None = None,
+    is_option: bool = False,
+) -> float:
     """Points of favourable move needed for a truly flat exit.
 
     Base is the real round-trip cost priced for the actual quantity
     (``breakeven_move`` is ``round_trip()/qty``, as the design spec requires), plus
-    slippage on both legs.
+    slippage on both legs. For options, uses exact statutory options_round_trip.
 
     That base alone is a few paise short: ``breakeven_move`` prices the round trip at the
     ENTRY price, but STT and brokerage scale with order value, so the sell leg costs more
@@ -116,8 +121,21 @@ def breakeven_buffer(entry: float, qty: int, slippage_pct: float | None = None) 
     if qty < 1 or entry <= 0:
         return float("inf")
     slip = _resolve_slippage(slippage_pct)
-    buffer = breakeven_move(entry, qty) + 2.0 * slip * entry
 
+    if is_option:
+        from trading.costs import options_round_trip
+        buffer = (options_round_trip(entry, entry, qty) / qty) + 2.0 * slip * entry
+        for _ in range(4):
+            stop = entry + buffer
+            entry_fill = entry * (1 + slip)
+            exit_fill = stop * (1 - slip)
+            net = (exit_fill - entry_fill) * qty - options_round_trip(entry_fill, exit_fill, qty)
+            if net >= 0:
+                break
+            buffer += (-net) / qty
+        return buffer
+
+    buffer = breakeven_move(entry, qty) + 2.0 * slip * entry
     for _ in range(4):
         stop = entry + buffer
         entry_fill = entry * (1 + slip)
@@ -140,8 +158,9 @@ def update_exit(
     qty: int,
     risk_per_share: float,
     config: TrailConfig,
+    is_option: bool = False,
 ) -> tuple[float, TrailState, int]:
-    """Advance the exit for one closed bar.
+    """Advance the exit for one closed bar or current live price.
 
     Returns ``(new_stop, new_state, partial_qty_to_close)``.
 
@@ -157,8 +176,7 @@ def update_exit(
 
     buy = side == "BUY"
 
-    # 1. Accumulate the favourable extreme. Closes, not highs/lows: the trail is defined
-    #    against closes so a single wick cannot ratchet the stop.
+    # 1. Accumulate the favourable extreme.
     if buy:
         highest = bar_close if state.highest_close is None else max(state.highest_close, bar_close)
         lowest = state.lowest_close
@@ -174,10 +192,9 @@ def update_exit(
     armed = state.armed or (r_multiple >= config.breakeven_at_r)
 
     # 4. Compute candidate stops and combine monotonically.
-    # Candidates always include current_stop to guarantee monotonicity.
     candidates = [current_stop]
     if armed:
-        buffer = breakeven_buffer(entry, qty, config.slippage_pct)
+        buffer = breakeven_buffer(entry, qty, config.slippage_pct, is_option=is_option)
         if buffer != float("inf"):
             candidates.append(entry + buffer if buy else entry - buffer)
 
@@ -187,10 +204,21 @@ def update_exit(
                 candidates.append(highest - config.trail_atr_mult * atr)
             elif not buy and lowest is not None:
                 candidates.append(lowest + config.trail_atr_mult * atr)
+        elif is_option:
+            # High-watermark profit lock for options without ATR series:
+            # when excursion expands >= 1.5R, lock in 50% of the gain above 1R.
+            if buy and highest is not None:
+                peak_gain = highest - entry
+                if peak_gain >= 1.5 * risk_per_share:
+                    candidates.append(entry + buffer + 0.5 * (peak_gain - risk_per_share))
+            elif not buy and lowest is not None:
+                peak_gain = entry - lowest
+                if peak_gain >= 1.5 * risk_per_share:
+                    candidates.append(entry - buffer - 0.5 * (peak_gain - risk_per_share))
 
     new_stop = max(candidates) if buy else min(candidates)
 
-    # 4. Partial booking -- instruction only, the caller fills and charges it.
+    # 5. Partial booking -- instruction only, the caller fills and charges it.
     partial_qty = 0
     partial_taken = state.partial_taken
     if (
@@ -198,7 +226,6 @@ def update_exit(
         and config.partial_at_r is not None
         and r_multiple >= config.partial_at_r
     ):
-        # Never book the whole position, and never round up into one.
         wanted = int(qty * config.partial_pct)
         partial_qty = max(0, min(wanted, qty - 1))
         if partial_qty > 0:

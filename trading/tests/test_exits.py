@@ -325,5 +325,36 @@ def test_nonpositive_risk_is_a_noop(risk):
     assert s == 98.0 and pq == 0
 
 
+def test_option_trailing_stop_breakeven_and_lock():
+    from trading.costs import options_round_trip
+    entry_prem = 35.0
+    qty = 250
+    risk = 10.5  # 30% stop: stop at 24.5
+    stop0 = entry_prem - risk
+    c = cfg(breakeven_at_r=1.0)
+
+    # 1. Below 1R: stop stays at initial stop
+    s, st, _ = update_exit(entry_prem, "BUY", stop0, 40.0, 0.0, TrailState(),
+                           qty=qty, risk_per_share=risk, config=c, is_option=True)
+    assert s == stop0
+    assert st.armed is False
+
+    # 2. At 1R (prem = 45.5): arms and moves to breakeven
+    s, st, _ = update_exit(entry_prem, "BUY", stop0, 45.5, 0.0, TrailState(),
+                           qty=qty, risk_per_share=risk, config=c, is_option=True)
+    assert st.armed is True
+    assert s > entry_prem, "Breakeven stop for option must be strictly above entry to cover flat brokerage"
+    entry_fill = entry_prem * (1 + SLIP)
+    exit_fill = s * (1 - SLIP)
+    net_opt = (exit_fill - entry_fill) * qty - options_round_trip(entry_fill, exit_fill, qty)
+    assert net_opt >= -1e-9, f"Option breakeven exit must not be negative: {net_opt}"
+
+    # 3. At 2R (prem = 56.0): profit-lock kicks in, locking in 50% of the gain above 1R
+    s_high, st_high, _ = update_exit(entry_prem, "BUY", s, 56.0, 0.0, st,
+                                     qty=qty, risk_per_share=risk, config=c, is_option=True)
+    assert s_high > s, "Option stop must trail upward as premium expands"
+    assert s_high > entry_prem + 4.0, "Substantial profit must be locked in"
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
