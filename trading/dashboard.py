@@ -1074,7 +1074,7 @@ __TOPBAR__
 
   <section class="panel">
     <div style="display:flex;justify-content:space-between;align-items:center;padding:9px 13px;border-bottom:1px solid var(--line);background:var(--cell)">
-      <h2 style="border-bottom:none;padding:0;background:none;margin:0">Trades <span class="sub">with the supervisor's verdict</span></h2>
+      <h2 style="border-bottom:none;padding:0;background:none;margin:0">Active Positions <span class="sub">live running trades with dynamic trailing stop</span></h2>
       <div style="display:flex;gap:8px;align-items:center">
         <button class="btn" id="btnAiScan" style="font-size:11.5px;padding:4px 10px;border-color:color-mix(in srgb,var(--accent) 55%,var(--line));color:var(--accent);font-weight:600">⚡ AI Agent Scan</button>
         <button class="btn go" id="btnNewTrade" style="font-size:11.5px;padding:4px 10px">+ Take Paper Trade</button>
@@ -1282,7 +1282,15 @@ __TOPBAR__
         <span id="tradeMsg" style="font-size:12px;font-weight:600"></span>
       </div>
     </div>
-    <div class="scroll"><table id="trades"></table></div>
+    <div class="scroll"><table id="openTrades"></table></div>
+  </section>
+
+  <section class="panel">
+    <div style="display:flex;justify-content:space-between;align-items:center;padding:9px 13px;border-bottom:1px solid var(--line);background:var(--cell)">
+      <h2 style="border-bottom:none;padding:0;background:none;margin:0">Trade History <span class="sub">completed trades · target &amp; stop-loss exits</span></h2>
+      <div id="closedTradesMeta" style="font-size:11.5px;color:var(--ink-3);font-family:ui-monospace,monospace"></div>
+    </div>
+    <div class="scroll"><table id="closedTrades"></table></div>
   </section>
 
   <section class="panel">
@@ -1594,141 +1602,211 @@ function verdictBadge(v){
 }
 
 function renderTrades(d){
-  const t=document.getElementById("trades");
-  if(!t) return;
-  t.replaceChildren();
-  if(!d.trades.length){ t.append(el("caption","empty","No trades for this date.")); return; }
-  const head=el("tr");
-  ["#","time","symbol","side","current price","qty","entry","SL","trailed SL","exit at","P&L (realized / live)","charges","strategy","verdict","reasons"]
-    .forEach((h,i)=>{const th=el("th",[4,5,6,7,8,9,10,11].includes(i)?"num":null,h); head.append(th);});
-  t.append(head);
-  d.trades.forEach(tr=>{
-    const row=el("tr");
-    row.append(el("td","mono",String(tr.id)));
-    row.append(el("td","mono",t2time(tr.ts)));
-    row.append(el("td",null,tr.symbol));
-    row.append(el("td",null,tr.side));
+  const openT = document.getElementById("openTrades") || document.getElementById("trades");
+  const closedT = document.getElementById("closedTrades");
 
-    // Current Price Column
-    const curPriceTd = el("td","num");
-    if(tr.status === "open"){
-      const ltpVal = tr.current_price != null ? tr.current_price : tr.entry_price;
-      const ltpPill = el("span","badge sm live-pulse", "₹" + fmt(ltpVal));
-      ltpPill.style.cssText = "font-family:ui-monospace,monospace;font-weight:700;padding:2px 7px;border-color:color-mix(in srgb,var(--accent) 55%,var(--line));color:var(--ink);background:var(--cell-2)";
-      curPriceTd.append(ltpPill);
+  const openTrades = (d.trades || []).filter(t => t.status === "open");
+  const closedTrades = (d.trades || []).filter(t => t.status === "closed");
+  closedTrades.sort((a, b) => (b.exit_ts || b.ts || 0) - (a.exit_ts || a.ts || 0));
+
+  // --- 1. RENDER ACTIVE OPEN POSITIONS ---
+  if(openT){
+    openT.replaceChildren();
+    if(!openTrades.length){
+      openT.append(el("caption","empty","No active open positions. Launch an AI Agent Scan or take a paper trade."));
     } else {
-      curPriceTd.innerHTML = `<span class="muted" style="font-size:11px">—</span>`;
+      const head = el("tr");
+      ["#","time","symbol","side","current price","qty","entry","SL","trailed SL","action","floating P&L","est charges","strategy","verdict","reasons"]
+        .forEach((h,i)=>{const th=el("th",[4,5,6,7,8,9,10,11].includes(i)?"num":null,h); head.append(th);});
+      openT.append(head);
+
+      openTrades.forEach(tr=>{
+        const row = el("tr");
+        row.append(el("td","mono",String(tr.id)));
+        row.append(el("td","mono",t2time(tr.ts)));
+        row.append(el("td",null,tr.symbol));
+        row.append(el("td",null,tr.side));
+
+        // Current Price Column
+        const curPriceTd = el("td","num");
+        const ltpVal = tr.current_price != null ? tr.current_price : tr.entry_price;
+        const ltpPill = el("span","badge sm live-pulse", "₹" + fmt(ltpVal));
+        ltpPill.style.cssText = "font-family:ui-monospace,monospace;font-weight:700;padding:2px 7px;border-color:color-mix(in srgb,var(--accent) 55%,var(--line));color:var(--ink);background:var(--cell-2)";
+        curPriceTd.append(ltpPill);
+        row.append(curPriceTd);
+
+        row.append(el("td","num",String(tr.qty)));
+        row.append(el("td","num",fmt(tr.entry_price)));
+
+        // 1. Initial Structural Stop Loss (SL)
+        const initialSlVal = tr.initial_stop != null ? tr.initial_stop : tr.stop_loss;
+        const slTd = el("td","num");
+        slTd.innerHTML = initialSlVal != null
+          ? `<span style="font-family:ui-monospace,monospace;font-size:11.5px;color:var(--ink-2);font-weight:600">₹${fmt(initialSlVal)}</span>`
+          : `<span class="muted">—</span>`;
+        row.append(slTd);
+
+        // 2. Dynamic Trailed Stop Loss (trailed SL)
+        const trailTd = el("td","num");
+        const currentSl = tr.stop_loss != null ? tr.stop_loss : initialSlVal;
+        const wrap = el("div");
+        wrap.style.cssText = "display:flex;flex-direction:column;align-items:flex-end;gap:2px";
+        if(tr.is_trailed_above_be){
+          wrap.innerHTML = `<span class="badge sm bull" style="font-family:ui-monospace,monospace;font-size:10px;font-weight:700;padding:2px 6px" title="Trailed SL locking in gains">🚀 ₹${fmt(currentSl)}</span><span style="font-size:8.5px;color:var(--up);font-weight:600">Locked Gain</span>`;
+        } else if(tr.is_breakeven_protected){
+          wrap.innerHTML = `<span class="badge sm" style="font-family:ui-monospace,monospace;font-size:10px;font-weight:700;padding:2px 6px;background:rgba(46,189,133,0.15);border-color:rgba(46,189,133,0.4);color:var(--up)" title="Breakeven Protected: Covers all statutory charges + slippage. Net profit cannot go negative.">🛡️ BE: ₹${fmt(currentSl)}</span><span style="font-size:8.5px;color:var(--up);font-weight:600">Zero Loss</span>`;
+        } else if(currentSl != null && initialSlVal != null && Math.abs(currentSl - initialSlVal) > 0.01){
+          wrap.innerHTML = `<span style="font-family:ui-monospace,monospace;font-size:11px;font-weight:600;color:var(--ink)">₹${fmt(currentSl)}</span>`;
+        } else {
+          wrap.innerHTML = `<span class="muted" style="font-size:10.5px" title="Awaiting arming condition">awaiting arm</span>`;
+        }
+        trailTd.append(wrap);
+        row.append(trailTd);
+
+        // Action: Close Button
+        const actTd = el("td","num");
+        const cBtn = el("button","btn sm","Close");
+        cBtn.style.padding = "3px 8px";
+        cBtn.style.fontSize = "11px";
+        cBtn.onclick = async ()=>{
+          cBtn.disabled = true;
+          cBtn.textContent = "Closing…";
+          try{
+            const res = await fetch("/api/close", {
+              method: "POST",
+              headers: {"Content-Type": "application/json"},
+              body: JSON.stringify({trade_id: tr.id})
+            });
+            const j = await res.json();
+            if(j.ok){ load(); } else { alert(j.error || "Failed to close trade"); cBtn.disabled=false; cBtn.textContent="Close"; }
+          }catch(e){ alert("Error: "+e); cBtn.disabled=false; cBtn.textContent="Close"; }
+        };
+        actTd.append(cBtn);
+        row.append(actTd);
+
+        // Floating P&L
+        const pnlTd = el("td","num");
+        const up = tr.unrealized_pnl ?? 0;
+        const pct = tr.pnl_pct ?? 0;
+        pnlTd.className = "num " + (up >= 0 ? "pnl-pos" : "pnl-neg");
+        const valDiv = el("div", null, (up >= 0 ? "+" : "") + fmt(up));
+        valDiv.style.fontWeight = "700";
+        valDiv.style.fontFamily = "ui-monospace,monospace";
+        const subDiv = el("div", "pnl-sub");
+        subDiv.textContent = (pct >= 0 ? "+" : "") + fmt(pct, 2) + "% live";
+        pnlTd.append(valDiv, subDiv);
+        row.append(pnlTd);
+
+        // Estimated Charges
+        const chgTd = el("td","num");
+        chgTd.innerHTML = `<span class="muted" style="font-size:11px" title="Estimated round-trip brokerage & charges">~₹${fmt(tr.est_charges || 0)} <span style="font-size:9px">est</span></span>`;
+        row.append(chgTd);
+
+        row.append(el("td","small",tr.strategy_id||"—"));
+        const vtd=el("td"); vtd.append(verdictBadge(tr.agent_verdict));
+        if(tr.agent_confidence!=null) vtd.append(el("span","small"," "+Number(tr.agent_confidence).toFixed(2)));
+        row.append(vtd);
+        let reasons="—";
+        try{const rr=JSON.parse(tr.agent_reasons||"[]"); if(rr.length)reasons=rr.join("; ");}catch(e){}
+        const rtd=el("td","small",reasons); rtd.style.maxWidth="320px"; row.append(rtd);
+        openT.append(row);
+      });
     }
-    row.append(curPriceTd);
+  }
 
-    row.append(el("td","num",String(tr.qty)));
-    row.append(el("td","num",fmt(tr.entry_price)));
-
-    // 1. Initial Structural Stop Loss (SL)
-    const initialSlVal = tr.initial_stop != null ? tr.initial_stop : tr.stop_loss;
-    const slTd = el("td","num");
-    slTd.innerHTML = initialSlVal != null
-      ? `<span style="font-family:ui-monospace,monospace;font-size:11.5px;color:var(--ink-2);font-weight:600">₹${fmt(initialSlVal)}</span>`
-      : `<span class="muted">—</span>`;
-    row.append(slTd);
-
-    // 2. Dynamic Trailed Stop Loss (trailed SL)
-    const trailTd = el("td","num");
-    const currentSl = tr.stop_loss != null ? tr.stop_loss : initialSlVal;
-    if(tr.status === "open"){
-      const wrap = el("div");
-      wrap.style.cssText = "display:flex;flex-direction:column;align-items:flex-end;gap:2px";
-      if(tr.is_trailed_above_be){
-        wrap.innerHTML = `<span class="badge sm bull" style="font-family:ui-monospace,monospace;font-size:10px;font-weight:700;padding:2px 6px" title="Trailed SL locking in gains">🚀 ₹${fmt(currentSl)}</span><span style="font-size:8.5px;color:var(--up);font-weight:600">Locked Gain</span>`;
-      } else if(tr.is_breakeven_protected){
-        wrap.innerHTML = `<span class="badge sm" style="font-family:ui-monospace,monospace;font-size:10px;font-weight:700;padding:2px 6px;background:rgba(46,189,133,0.15);border-color:rgba(46,189,133,0.4);color:var(--up)" title="Breakeven Protected: Covers all statutory charges + slippage. Net profit cannot go negative.">🛡️ BE: ₹${fmt(currentSl)}</span><span style="font-size:8.5px;color:var(--up);font-weight:600">Zero Loss</span>`;
-      } else if(currentSl != null && initialSlVal != null && Math.abs(currentSl - initialSlVal) > 0.01){
-        wrap.innerHTML = `<span style="font-family:ui-monospace,monospace;font-size:11px;font-weight:600;color:var(--ink)">₹${fmt(currentSl)}</span>`;
-      } else {
-        wrap.innerHTML = `<span class="muted" style="font-size:10.5px" title="Awaiting arming condition">awaiting arm</span>`;
+  // --- 2. RENDER COMPLETED TRADE HISTORY ---
+  if(closedT){
+    closedT.replaceChildren();
+    const meta = document.getElementById("closedTradesMeta");
+    if(!closedTrades.length){
+      closedT.append(el("caption","empty","No completed trades for this date yet."));
+      if(meta) meta.textContent = "";
+    } else {
+      if(meta){
+        const totalPnl = closedTrades.reduce((acc, t) => acc + (t.pnl || 0), 0);
+        meta.textContent = `${closedTrades.length} trade${closedTrades.length>1?'s':''} completed · Realized P&L: ${totalPnl>=0?'+':''}₹${fmt(totalPnl)}`;
       }
-      trailTd.append(wrap);
-    } else {
-      if(tr.exit_reason === "trailing_stop_hit"){
-        trailTd.innerHTML = `<span class="badge sm" style="font-size:9.5px;padding:2px 6px;background:rgba(46,189,133,0.15);color:var(--up);border-color:rgba(46,189,133,0.3)">🛡️ ₹${fmt(currentSl)}</span>`;
-      } else {
-        trailTd.innerHTML = currentSl != null ? `<span style="font-family:ui-monospace,monospace;font-size:11px;color:var(--ink-3)">₹${fmt(currentSl)}</span>` : `<span class="muted">—</span>`;
-      }
-    }
-    row.append(trailTd);
+      const head = el("tr");
+      ["#","entry time","exit time","symbol","side","qty","entry","SL","trailed SL","exit at","realized P&L","charges","strategy","verdict","reasons"]
+        .forEach((h,i)=>{const th=el("th",[5,6,7,8,9,10,11].includes(i)?"num":null,h); head.append(th);});
+      closedT.append(head);
 
-    // 3. Exit at
-    const isClosed = tr.status === "closed" && tr.exit_price != null;
-    const exitTd = el("td","num");
-    if(isClosed){
-      const wrap = el("div");
-      wrap.style.cssText = "display:flex;flex-direction:column;align-items:flex-end;gap:2px";
-      let exitBadge = "";
-      if(tr.exit_reason === "trailing_stop_hit"){
-        exitBadge = `<span class="badge sm" style="font-size:8.5px;padding:1px 5px;background:rgba(46,189,133,0.15);color:var(--up);border-color:rgba(46,189,133,0.3)">🛡️ Trailed SL Exit</span>`;
-      } else if(tr.exit_reason === "target_reached"){
-        exitBadge = `<span class="badge sm bull" style="font-size:8.5px;padding:1px 5px">🎯 Target Hit</span>`;
-      } else if(tr.exit_reason === "stop_loss_hit"){
-        exitBadge = `<span class="badge sm bear" style="font-size:8.5px;padding:1px 5px">🛑 SL Hit</span>`;
-      }
-      wrap.innerHTML = `<span style="font-family:ui-monospace,monospace;font-weight:700">₹${fmt(tr.exit_price)}</span>${exitBadge}`;
-      exitTd.append(wrap);
-    } else {
-      const cBtn = el("button","btn sm","Close");
-      cBtn.style.padding = "3px 8px";
-      cBtn.style.fontSize = "11px";
-      cBtn.onclick = async ()=>{
-        cBtn.disabled = true;
-        cBtn.textContent = "Closing…";
-        try{
-          const res = await fetch("/api/close", {
-            method: "POST",
-            headers: {"Content-Type": "application/json"},
-            body: JSON.stringify({trade_id: tr.id})
-          });
-          const j = await res.json();
-          if(j.ok){ load(); } else { alert(j.error || "Failed to close trade"); cBtn.disabled=false; cBtn.textContent="Close"; }
-        }catch(e){ alert("Error: "+e); cBtn.disabled=false; cBtn.textContent="Close"; }
-      };
-      exitTd.append(cBtn);
-    }
-    row.append(exitTd);
+      closedTrades.forEach(tr=>{
+        const row = el("tr");
+        row.append(el("td","mono",String(tr.id)));
+        row.append(el("td","mono",t2time(tr.ts)));
+        row.append(el("td","mono",tr.exit_ts ? t2time(tr.exit_ts) : "—"));
+        row.append(el("td",null,tr.symbol));
+        row.append(el("td",null,tr.side));
+        row.append(el("td","num",String(tr.qty)));
+        row.append(el("td","num",fmt(tr.entry_price)));
 
-    const pnlTd = el("td","num");
-    if(isClosed){
-      const p = tr.pnl ?? 0;
-      pnlTd.className = "num " + (p >= 0 ? "pnl-pos" : "pnl-neg");
-      pnlTd.textContent = (p >= 0 ? "+" : "") + fmt(p);
-    } else {
-      const up = tr.unrealized_pnl ?? 0;
-      const pct = tr.pnl_pct ?? 0;
-      pnlTd.className = "num " + (up >= 0 ? "pnl-pos" : "pnl-neg");
-      const valDiv = el("div", null, (up >= 0 ? "+" : "") + fmt(up));
-      valDiv.style.fontWeight = "700";
-      valDiv.style.fontFamily = "ui-monospace,monospace";
-      const subDiv = el("div", "pnl-sub");
-      subDiv.textContent = (pct >= 0 ? "+" : "") + fmt(pct, 2) + "% live";
-      pnlTd.append(valDiv, subDiv);
-    }
-    row.append(pnlTd);
+        // SL
+        const initialSlVal = tr.initial_stop != null ? tr.initial_stop : tr.stop_loss;
+        const slTd = el("td","num");
+        slTd.innerHTML = initialSlVal != null
+          ? `<span style="font-family:ui-monospace,monospace;font-size:11.5px;color:var(--ink-2);font-weight:600">₹${fmt(initialSlVal)}</span>`
+          : `<span class="muted">—</span>`;
+        row.append(slTd);
 
-    const chgTd = el("td","num");
-    if(isClosed){
-      chgTd.textContent = tr.charges == null ? "—" : fmt(tr.charges);
-    } else {
-      chgTd.innerHTML = `<span class="muted" style="font-size:11px" title="Estimated round-trip brokerage & charges">~₹${fmt(tr.est_charges || 0)} <span style="font-size:9px">est</span></span>`;
-    }
-    row.append(chgTd);
+        // Trailed SL
+        const trailTd = el("td","num");
+        const currentSl = tr.stop_loss != null ? tr.stop_loss : initialSlVal;
+        if(tr.exit_reason === "trailing_stop_hit"){
+          trailTd.innerHTML = `<span class="badge sm" style="font-size:9.5px;padding:2px 6px;background:rgba(46,189,133,0.15);color:var(--up);border-color:rgba(46,189,133,0.3)">🛡️ ₹${fmt(currentSl)}</span>`;
+        } else {
+          trailTd.innerHTML = currentSl != null ? `<span style="font-family:ui-monospace,monospace;font-size:11px;color:var(--ink-3)">₹${fmt(currentSl)}</span>` : `<span class="muted">—</span>`;
+        }
+        row.append(trailTd);
 
-    row.append(el("td","small",tr.strategy_id||"—"));
-    const vtd=el("td"); vtd.append(verdictBadge(tr.agent_verdict));
-    if(tr.agent_confidence!=null) vtd.append(el("span","small"," "+Number(tr.agent_confidence).toFixed(2)));
-    row.append(vtd);
-    let reasons="—";
-    try{const rr=JSON.parse(tr.agent_reasons||"[]"); if(rr.length)reasons=rr.join("; ");}catch(e){}
-    const rtd=el("td","small",reasons); rtd.style.maxWidth="320px"; row.append(rtd);
-    t.append(row);
-  });
+        // Exit at with outcome badge (Target / Trailed SL / SL Hit / Manual)
+        const exitTd = el("td","num");
+        const wrap = el("div");
+        wrap.style.cssText = "display:flex;flex-direction:column;align-items:flex-end;gap:2px";
+        let exitBadge = "";
+        if(tr.exit_reason === "trailing_stop_hit"){
+          exitBadge = `<span class="badge sm" style="font-size:8.5px;padding:1px 5px;background:rgba(46,189,133,0.15);color:var(--up);border-color:rgba(46,189,133,0.3)">🛡️ Trailed SL Exit</span>`;
+        } else if(tr.exit_reason === "target_reached"){
+          exitBadge = `<span class="badge sm bull" style="font-size:8.5px;padding:1px 5px">🎯 Target Hit</span>`;
+        } else if(tr.exit_reason === "stop_loss_hit"){
+          exitBadge = `<span class="badge sm bear" style="font-size:8.5px;padding:1px 5px">🛑 SL Hit</span>`;
+        } else if(tr.exit_reason === "manual_close" || tr.exit_reason === "manual"){
+          exitBadge = `<span class="badge sm" style="font-size:8.5px;padding:1px 5px">Manual Exit</span>`;
+        } else if(tr.exit_reason){
+          exitBadge = `<span class="badge sm" style="font-size:8.5px;padding:1px 5px">${tr.exit_reason.replace(/_/g, " ")}</span>`;
+        } else {
+          exitBadge = `<span class="badge sm" style="font-size:8.5px;padding:1px 5px">Closed</span>`;
+        }
+        wrap.innerHTML = `<span style="font-family:ui-monospace,monospace;font-weight:700">₹${fmt(tr.exit_price)}</span>${exitBadge}`;
+        exitTd.append(wrap);
+        row.append(exitTd);
+
+        // Realized P&L
+        const pnlTd = el("td","num");
+        const p = tr.pnl ?? 0;
+        pnlTd.className = "num " + (p >= 0 ? "pnl-pos" : "pnl-neg");
+        pnlTd.textContent = (p >= 0 ? "+" : "") + fmt(p);
+        row.append(pnlTd);
+
+        // Charges
+        const chgTd = el("td","num");
+        chgTd.textContent = tr.charges == null ? "—" : "₹" + fmt(tr.charges);
+        row.append(chgTd);
+
+        row.append(el("td","small",tr.strategy_id||"—"));
+        const vtd = el("td");
+        vtd.append(verdictBadge(tr.agent_verdict));
+        if(tr.agent_confidence!=null) vtd.append(el("span","small"," "+Number(tr.agent_confidence).toFixed(2)));
+        row.append(vtd);
+        let reasons = "—";
+        try{const rr=JSON.parse(tr.agent_reasons||"[]"); if(rr.length)reasons=rr.join("; ");}catch(e){}
+        const rtd = el("td","small",reasons);
+        rtd.style.maxWidth = "320px";
+        row.append(rtd);
+        closedT.append(row);
+      });
+    }
+  }
 }
 
 function renderRej(d){
