@@ -50,7 +50,23 @@ def call_price(spot: float, strike: float, years: float, iv: float) -> float:
     return spot * _norm_cdf(d1) - strike * _norm_cdf(d2)
 
 
-def implied_vol(price: float, spot: float, strike: float, years: float) -> float | None:
+def put_price(spot: float, strike: float, years: float, iv: float) -> float:
+    """Black-Scholes put value, zero rates and no dividends."""
+    if years <= MIN_YEARS or iv <= 0:
+        return max(0.0, strike - spot)          # at expiry: intrinsic only
+    vt = iv * math.sqrt(years)
+    d1 = (math.log(spot / strike) + 0.5 * iv * iv * years) / vt
+    d2 = d1 - vt
+    return strike * _norm_cdf(-d2) - spot * _norm_cdf(-d1)
+
+
+def option_price(spot: float, strike: float, years: float, iv: float, is_call: bool = True) -> float:
+    """Black-Scholes value for Call or Put."""
+    return call_price(spot, strike, years, iv) if is_call else put_price(spot, strike, years, iv)
+
+
+def implied_vol(price: float, spot: float, strike: float, years: float,
+                is_call: bool = True) -> float | None:
     """The volatility that reproduces `price`, or None if none does.
 
     Bisection rather than Newton: it cannot diverge, and these are traded
@@ -58,15 +74,16 @@ def implied_vol(price: float, spot: float, strike: float, years: float) -> float
     """
     if price <= 0 or spot <= 0 or strike <= 0 or years <= MIN_YEARS:
         return None
-    intrinsic = max(0.0, spot - strike)
+    intrinsic = max(0.0, spot - strike) if is_call else max(0.0, strike - spot)
     if price <= intrinsic:
         return None                 # no time value to explain — often a stale print
     lo, hi = IV_BOUNDS
-    if call_price(spot, strike, years, hi) < price:
+    fn = call_price if is_call else put_price
+    if fn(spot, strike, years, hi) < price:
         return None                 # price above what even 500% vol produces
     for _ in range(80):
         mid = (lo + hi) / 2
-        if call_price(spot, strike, years, mid) < price:
+        if fn(spot, strike, years, mid) < price:
             lo = mid
         else:
             hi = mid
@@ -94,24 +111,17 @@ class Projection:
 
 def decay_curve(*, spot: float, strike: float, premium_now: float,
                 expiry: date, now: datetime,
-                days: tuple[float, ...] = (0.25, 1.0, 2.0, 3.0)) -> list[dict]:
-    """What the option is worth at each horizon **if the underlying does not move**.
-
-    This is the number that decides whether a cheap strike is a sensible bet or
-    a donation. A far out-of-the-money call doubles on a small move — genuinely
-    — but it is a bet that the move happens *now*: hold it flat for three days
-    and it can keep 3% of its value, while a near-the-money strike keeps 75%.
-    Cheapness buys leverage and sells patience, and only this curve shows the
-    price of that trade.
-    """
+                days: tuple[float, ...] = (0.25, 1.0, 2.0, 3.0),
+                is_call: bool = True) -> list[dict]:
+    """What the option is worth at each horizon **if the underlying does not move**."""
     years = years_to_expiry(expiry, now)
-    iv = implied_vol(premium_now, spot, strike, years)
+    iv = implied_vol(premium_now, spot, strike, years, is_call=is_call)
     if iv is None:
         return []
     out = []
     for d in days:
         left = max(years - d / YEAR_DAYS, 0.0)
-        px = call_price(spot, strike, left, iv)
+        px = option_price(spot, strike, left, iv, is_call=is_call)
         out.append({"days": d, "premium": px,
                     "pct_left": (px / premium_now * 100) if premium_now > 0 else None})
     return out
@@ -119,18 +129,14 @@ def decay_curve(*, spot: float, strike: float, premium_now: float,
 
 def project(*, spot_now: float, strike: float, premium_now: float,
             expiry: date, now: datetime, targets: list[float],
-            hold_hours: float = 2.0) -> tuple[float | None, list[Projection]]:
-    """(implied vol, projected premiums at each target price).
-
-    `hold_hours` is how long the position is assumed to be held — the estimate
-    is aged by that much, so the decay an intraday trade actually pays is
-    charged rather than ignored.
-    """
+            hold_hours: float = 2.0,
+            is_call: bool = True) -> tuple[float | None, list[Projection]]:
+    """(implied vol, projected premiums at each target price)."""
     years_now = years_to_expiry(expiry, now)
-    iv = implied_vol(premium_now, spot_now, strike, years_now)
+    iv = implied_vol(premium_now, spot_now, strike, years_now, is_call=is_call)
     if iv is None:
         return None, []
     years_then = max(0.0, years_now - hold_hours / 24.0 / YEAR_DAYS)
-    out = [Projection(t, call_price(t, strike, years_then, iv), premium_now)
+    out = [Projection(t, option_price(t, strike, years_then, iv, is_call=is_call), premium_now)
            for t in targets]
     return iv, out

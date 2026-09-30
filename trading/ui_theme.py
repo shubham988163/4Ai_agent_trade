@@ -265,16 +265,19 @@ function niftyPanel(ix, nf){
   const mk = (t,c,x) => { const n=document.createElement(t); if(c) n.className=c;
     if(x!==undefined) n.textContent=x; return n; };
   const box = mk("section","panel nfx");
-  const h2 = mk("h2"); h2.append(document.createTextNode("NIFTY 50 option"));
+  const h2 = mk("h2");
+  const titleName = (ix && ix.name) ? ix.name : "NIFTY 50";
+  h2.append(document.createTextNode(titleName + " option"));
   if(!ix){
     box.append(h2);
     box.append(mk("div","empty","No index read this scan."));
     return box;
   }
   const buyable = ix.tradeable && ix.option && ix.option.quote;
+  const kind = (ix.direction === "PUT" || (ix.option && ix.option.quote && ix.option.quote.option_type === "Put")) ? "PE" : "CE";
   const badge = mk("span","badge sm " + (buyable ? "v-buy" : "v-avoid"));
   badge.append(mk("span","g", buyable ? "\u2713" : "\u2715"));
-  badge.append(document.createTextNode(buyable ? "BUY" : "NO TRADE"));
+  badge.append(document.createTextNode(buyable ? ("BUY " + kind) : "NO TRADE"));
   h2.append(badge);
   box.append(h2);
 
@@ -288,10 +291,47 @@ function niftyPanel(ix, nf){
   const call = mk("div","call");
   if(o && o.quote){
     const q = o.quote;
-    call.append(mk("span","strike mono", q.strike + " CE @ " + nf(q.ltp)));
+    call.append(mk("span","strike mono", q.strike + " " + kind + " @ " + nf(q.ltp)));
     call.append(mk("span","chip", q.expiry));
     call.append(mk("span","chip", q.moneyness));
     call.append(mk("span","st", "OI " + (q.open_interest||0).toLocaleString("en-IN")));
+
+    const buyBtn = mk("button", "btn sm go", "Paper Buy " + kind);
+    buyBtn.style.marginLeft = "auto";
+    buyBtn.onclick = async () => {
+      buyBtn.disabled = true;
+      buyBtn.textContent = "Executing…";
+      try {
+        const res = await fetch("/api/trade", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({
+            symbol: q.identifier || (titleName.replace(/\s+/g, "")) + q.strike + kind,
+            underlying: titleName,
+            side: "BUY",
+            is_option: true,
+            option_type: kind,
+            price: q.ltp,
+            stop_loss: o.premium_at_stop || (q.ltp * 0.7),
+            target: o.premium_at_t1 || (q.ltp * 1.5),
+            strategy_id: "index_orb_option"
+          })
+        });
+        const j = await res.json();
+        if(j.ok) {
+          buyBtn.textContent = "✓ Trade #" + j.trade_id;
+          buyBtn.style.background = "var(--good)";
+        } else {
+          buyBtn.textContent = "✗ Rejected";
+          buyBtn.title = j.reason || j.error || "Order rejected";
+          setTimeout(() => { buyBtn.disabled = false; buyBtn.textContent = "Paper Buy " + kind; }, 3000);
+        }
+      } catch(err) {
+        buyBtn.textContent = "✗ Error";
+        setTimeout(() => { buyBtn.disabled = false; buyBtn.textContent = "Paper Buy " + kind; }, 3000);
+      }
+    };
+    call.append(buyBtn);
   } else {
     call.append(mk("span","nocall","NO CALL"));
     call.append(mk("span","st", (o && o.rejections && o.rejections[0]) ||

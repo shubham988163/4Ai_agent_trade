@@ -209,11 +209,20 @@ class LiveFeed:
 
     def index_option_board(self) -> list:
         """The full NIFTY option chain, as OptionQuote objects."""
-        return self._options(lambda: self.nse.index_options(), "NIFTY chain")
+        return self._options(lambda: self.nse.index_options("nse50_opt"), "NIFTY chain")
+
+    def banknifty_option_board(self) -> list:
+        """The full BANK NIFTY option chain, as OptionQuote objects."""
+        return self._options(lambda: self.nse.index_options("nifty_bank_opt"), "BANK NIFTY chain")
 
     def option_board(self) -> list:
         """Most-active stock option contracts, as OptionQuote objects."""
         return self._options(lambda: self.nse.active_options(), "option board")
+
+    def stock_option_board(self, symbol: str) -> list:
+        """Options for a specific stock."""
+        board = self.option_board()
+        return [q for q in board if q.underlying == symbol]
 
     def _options(self, fetch, label: str) -> list:
         from trading.fno.options import OptionQuote

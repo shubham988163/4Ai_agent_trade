@@ -186,3 +186,44 @@ def test_bank_specific_nii_metric():
     # NII YoY: (42000 - 35000) / 35000 * 100 = +20.0%
     assert fund["yoy_nii_pct"] == 20.0
     assert "NII YoY: +20.0%" in summary
+
+
+# --- untracked-symbol contract -------------------------------------------
+
+def test_untracked_symbol_returns_the_same_three_tuple_as_tracked_ones():
+    """An untracked symbol used to return a 2-tuple, which blew up every
+    caller that unpacks three. Because the untracked branch is the one every
+    Nifty-50 name and every F&O-scanner candidate takes, that one omission made
+    `lazy_fetch_indian_context` fail for every symbol outside the 6-name
+    watchlist -- and `fetch_symbol_context` swallowed it into a bare
+    "no market data", so the agent simply never traded them."""
+    from trading.indian_market_data import WATCHLIST_METADATA, filter_curated_news
+
+    tracked = next(iter(WATCHLIST_METADATA))
+    untracked = next(s for s in ("DRREDDY", "GLENMARK", "VMM", "TATAMOTORS")
+                     if s not in WATCHLIST_METADATA)
+
+    ok, ok_summary, ok_audit = filter_curated_news([], tracked)
+    bad, bad_summary, bad_audit = filter_curated_news([], untracked)
+
+    assert (ok, ok_summary, ok_audit) == ([], ok_summary, []) or ok is not None
+    assert bad == [] and bad_audit == []
+    assert "untracked symbol" in bad_summary
+    assert isinstance(ok_audit, list) and isinstance(bad_audit, list)
+
+
+def test_lazy_fetch_indian_context_survives_an_untracked_symbol():
+    """The whole point: this must not raise for a symbol the watchlist
+    metadata does not cover."""
+    from trading.indian_market_data import lazy_fetch_indian_context
+
+    class _Ticker:
+        news: list = []
+        quarterly_income_stmt = None
+
+    structured_news, summary, fundamentals, quarterly = lazy_fetch_indian_context(
+        symbol="GLENMARK", ticker=_Ticker())
+
+    assert isinstance(structured_news, list)
+    assert isinstance(fundamentals, dict)
+    assert "untracked symbol" in summary

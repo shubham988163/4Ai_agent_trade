@@ -281,6 +281,120 @@ def plan_call(symbol: str, board: list[OptionQuote], *, spot: float,
     return plan
 
 
+def plan_put(symbol: str, board: list[OptionQuote], *, spot: float,
+             target1: float, target2: float, stop: float | None = None,
+             now: datetime | None = None,
+             today: date | None = None) -> OptionPlan:
+    """Pick the put option that a short/bearish setup on this stock could be expressed in."""
+    every = puts_for(symbol, board)
+    listed = _front_expiry(every)
+    if not listed:
+        return OptionPlan(None, None, None, False, False,
+                          rejections=["no live option data for this name — no puts available"])
+
+    plan = OptionPlan(None, None, None, False, False, considered=listed)
+    viable: list[tuple[float, OptionQuote, dict]] = []
+    near_misses: list[str] = []
+
+    for q in listed:
+        if q.last_price <= 0:
+            continue
+        if spot > 0 and (q.last_price / spot * 100) > MAX_PREMIUM_PCT:
+            continue
+        thin = q.liquidity_problem()
+        if thin:
+            near_misses.append(f"{q.strike:g} PE: {thin}")
+            continue
+
+        proj = _model(q, spot=spot, stop=stop, target1=target1, target2=target2,
+                      now=now, today=today)
+        if proj is None:
+            # Conservative fallback: put breaks even at strike - last_price.
+            # Must clear 1:3 target downwards.
+            if q.breakeven < target2:
+                near_misses.append(
+                    f"{q.strike:g} PE at {q.last_price:.2f}: no usable price model, "
+                    f"and its expiry breakeven {q.breakeven:.2f} is beyond the "
+                    f"1:3 target {target2:.2f}")
+                continue
+            viable.append((abs(q.strike - spot), q, {}))
+            continue
+
+        rr = proj.get("rr")
+        if rr is None:
+            if q.breakeven < target2:
+                near_misses.append(
+                    f"{q.strike:g} PE at {q.last_price:.2f} breaks even at "
+                    f"{q.breakeven:.2f} — beyond the 1:3 target {target2:.2f}")
+                continue
+        elif rr < MIN_OPTION_RR:
+            near_misses.append(
+                f"{q.strike:g} PE: risks {q.last_price - proj['at_stop']:.2f} to make "
+                f"{proj['at_t1'] - q.last_price:.2f} on the move — {rr:.2f}:1, worse "
+                "than one-to-one")
+            continue
+
+        viable.append((-(rr or 0) + abs(q.strike - spot) / max(spot, 1) * 10, q, proj))
+
+    if not viable:
+        later = [q for q in every if q not in listed]
+        if later:
+            near_misses.append(
+                f"nothing works in the {listed[0].expiry} expiry; later expiries "
+                "are not offered for an intraday trade")
+        plan.rejections = near_misses[:3] or [
+            "no listed put makes more on the planned move than it loses at the stop"]
+        return plan
+
+    viable.sort(key=lambda x: x[0])
+    best = viable[0][1]
+    be = best.breakeven
+    plan.quote = best
+    plan.breakeven = be
+    plan.breakeven_vs_t1 = (target1 - be) / target1 * 100 if target1 else None
+    plan.clears_t1 = be > target1
+    plan.clears_t2 = be > target2
+
+    exp = parse_expiry(best.expiry)
+    if exp is not None:
+        plan.decay = pricing.decay_curve(
+            spot=spot, strike=best.strike, premium_now=best.last_price,
+            expiry=exp, now=now or datetime.now(IST), is_call=False)
+
+    modelled = viable[0][2]
+    if modelled:
+        plan.implied_vol = modelled["iv"]
+        plan.premium_at_t1 = modelled["at_t1"]
+        plan.premium_at_t2 = modelled["at_t2"]
+        plan.premium_at_stop = modelled.get("at_stop")
+    else:
+        plan.warnings.append("premium does not fit any sane volatility — likely a "
+                             "stale print; no exit price is modelled")
+
+    if best.expires_today(today):
+        plan.warnings.append("EXPIRES TODAY — premium decays to intrinsic value by "
+                             "the close; an intraday stall loses money")
+    if best.moneyness == "OTM":
+        plan.warnings.append(f"out of the money — the stock must drop below {be:.2f} "
+                             "for this to pay")
+    if not plan.clears_t1:
+        plan.warnings.append(
+            f"breakeven {be:.2f} is below target 1 — if you HOLD TO EXPIRY only "
+            "the 1:3 target pays. Exiting on the move is priced above.")
+    return plan
+
+
+def plan_option(symbol: str, board: list[OptionQuote], *, side: str = "BUY",
+                spot: float, target1: float, target2: float, stop: float | None = None,
+                now: datetime | None = None, today: date | None = None) -> OptionPlan:
+    """Unified helper to choose Call (for BUY/LONG) or Put (for SELL/SHORT)."""
+    if side.upper() in ("SELL", "PUT", "PE", "SHORT"):
+        return plan_put(symbol, board, spot=spot, target1=target1, target2=target2,
+                        stop=stop, now=now, today=today)
+    return plan_call(symbol, board, spot=spot, target1=target1, target2=target2,
+                     stop=stop, now=now, today=today)
+
+
 def _model(q: OptionQuote, *, spot: float, stop: float | None,
            target1: float, target2: float, now: datetime | None,
            today: date | None) -> dict | None:
@@ -291,9 +405,10 @@ def _model(q: OptionQuote, *, spot: float, stop: float | None,
     when = now or datetime.combine(today or datetime.now(IST).date(),
                                    datetime.min.time()).replace(tzinfo=IST)
     levels = [target1, target2] + ([stop] if stop is not None else [])
+    is_call = (q.option_type == "Call")
     iv, proj = pricing.project(spot_now=spot, strike=q.strike,
                                premium_now=q.last_price, expiry=expiry,
-                               now=when, targets=levels)
+                               now=when, targets=levels, is_call=is_call)
     if iv is None:
         return None
     out = {"iv": iv, "at_t1": proj[0].premium, "at_t2": proj[1].premium}
@@ -307,11 +422,10 @@ def _model(q: OptionQuote, *, spot: float, stop: float | None,
 def describe(plan: OptionPlan) -> str:
     """One-line summary for the terminal report."""
     if plan.quote is None:
-        # Lead with the refusal. A summary that opens with a strike price reads
-        # as a recommendation even when the rest of the sentence rejects it.
         return "options: NO CALL — " + (plan.rejections[0] if plan.rejections
                                         else "no candidate strike")
     q = plan.quote
-    return (f"options: {q.strike:g} CE @ {q.last_price:.2f} ({q.expiry}, "
+    kind = "CE" if q.option_type == "Call" else "PE"
+    return (f"options: {q.strike:g} {kind} @ {q.last_price:.2f} ({q.expiry}, "
             f"{q.moneyness}) — breakeven {plan.breakeven:.2f}, "
             f"OI {q.open_interest:,.0f}")

@@ -108,22 +108,32 @@ class ExecutionRouter:
 
         price = float(signal.get("price", 0.0))
         side = signal.get("side")
+        sym = str(signal.get("symbol", ""))
+        is_option = bool(signal.get("is_option")) or ("CE" in sym or "PE" in sym)
 
-        if side == "BUY" and stop_loss >= price:
-            return f"invalid_stop_loss (BUY stop_loss {stop_loss:.2f} must be below entry price {price:.2f})"
-        if side == "SELL" and stop_loss <= price:
+        if is_option or side == "BUY":
+            if stop_loss >= price:
+                return f"invalid_stop_loss (BUY stop_loss {stop_loss:.2f} must be below entry price {price:.2f})"
+        elif side == "SELL" and stop_loss <= price:
             return f"invalid_stop_loss (SELL stop_loss {stop_loss:.2f} must be above entry price {price:.2f})"
 
         per_share_risk = abs(price - stop_loss)
         if per_share_risk <= 0.05:
             return "invalid_stop_loss (stop loss too close to entry price)"
 
-        # 2. Cost-floor check: round-trip friction cannot exceed MAX_COST_RISK_RATIO of risk (shared helper)
-        from trading.costs import check_cost_floor
-        passed, cost_ratio = check_cost_floor(price, stop_loss, qty=int(signal.get("qty", 1)))
-        if not passed:
-            return (f"cost_floor_breached (round-trip friction {cost_ratio*100:.1f}% of risk "
-                    f"exceeds limit {MAX_COST_RISK_RATIO*100:.1f}%)")
+        # 2. Cost-floor check: round-trip friction cannot exceed MAX_COST_RISK_RATIO of risk
+        if is_option:
+            from trading.costs import check_option_cost_floor
+            passed, cost_ratio = check_option_cost_floor(price, stop_loss, qty=int(signal.get("qty", 1)))
+            if not passed:
+                return (f"option_cost_floor_breached (round-trip friction {cost_ratio*100:.1f}% of risk "
+                        f"exceeds limit {MAX_COST_RISK_RATIO*100:.1f}%)")
+        else:
+            from trading.costs import check_cost_floor
+            passed, cost_ratio = check_cost_floor(price, stop_loss, qty=int(signal.get("qty", 1)))
+            if not passed:
+                return (f"cost_floor_breached (round-trip friction {cost_ratio*100:.1f}% of risk "
+                        f"exceeds limit {MAX_COST_RISK_RATIO*100:.1f}%)")
 
         # 3. Trend gate check (router hard risk kernel — restricted to orb_ma200 strategies)
         strat_id = str(signal.get("strategy_id", ""))
@@ -131,10 +141,17 @@ class ExecutionRouter:
             trend_state = signal.get("trend_state")
             if trend_state not in ("up", "down"):
                 return f"trend_gate_failed (trend state '{trend_state}' is not permitted)"
-            if side == "BUY" and trend_state != "up":
-                return f"trend_gate_failed (BUY requires trend_state 'up', got '{trend_state}')"
-            if side == "SELL" and trend_state != "down":
-                return f"trend_gate_failed (SELL requires trend_state 'down', got '{trend_state}')"
+            if is_option:
+                opt_type = signal.get("option_type") or ("CE" if "CE" in sym else "PE" if "PE" in sym else "CE")
+                if opt_type == "CE" and trend_state != "up":
+                    return f"trend_gate_failed (Call Option CE requires trend_state 'up', got '{trend_state}')"
+                if opt_type == "PE" and trend_state != "down":
+                    return f"trend_gate_failed (Put Option PE requires trend_state 'down', got '{trend_state}')"
+            else:
+                if side == "BUY" and trend_state != "up":
+                    return f"trend_gate_failed (BUY requires trend_state 'up', got '{trend_state}')"
+                if side == "SELL" and trend_state != "down":
+                    return f"trend_gate_failed (SELL requires trend_state 'down', got '{trend_state}')"
 
         day_pnl = self.ledger.day_realized_pnl()
 
@@ -152,8 +169,14 @@ class ExecutionRouter:
 
         position_value = signal["qty"] * signal["price"]
         existing = self.ledger.open_position_value(signal["symbol"])
-        if existing + position_value > MAX_POSITION_VALUE:
-            return f"max_position_value (cap={MAX_POSITION_VALUE:.0f}, would_be={existing + position_value:.0f})"
+        if is_option:
+            from trading.config import MAX_OPTION_POSITION_VALUE
+            cap = MAX_OPTION_POSITION_VALUE
+            if existing + position_value > cap:
+                return f"max_option_position_value (cap={cap:.0f}, would_be={existing + position_value:.0f})"
+        else:
+            if existing + position_value > MAX_POSITION_VALUE:
+                return f"max_position_value (cap={MAX_POSITION_VALUE:.0f}, would_be={existing + position_value:.0f})"
 
         return None
 
@@ -201,7 +224,10 @@ class ExecutionRouter:
                 from trading.fno.fyers import FyersClient
                 fyers = FyersClient()
                 sym = signal["symbol"]
-                fyers_sym = f"NSE:{sym}-EQ" if not sym.startswith("NSE:") else sym
+                if "CE" in sym or "PE" in sym or "INDEX" in sym:
+                    fyers_sym = sym if sym.startswith("NSE:") else f"NSE:{sym}"
+                else:
+                    fyers_sym = f"NSE:{sym}-EQ" if not sym.startswith("NSE:") else sym
                 q = fyers.quotes([fyers_sym])
                 if q and len(q) > 0 and "v" in q[0] and "lp" in q[0]["v"]:
                     ltp = float(q[0]["v"]["lp"])

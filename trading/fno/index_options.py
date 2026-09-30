@@ -37,7 +37,7 @@ EXTENDED_ATR = 1.25
 
 @dataclass
 class IndexPlan:
-    """A call on the index, or the reason there is not one."""
+    """An option plan on the index (Call or Put), or the reason there is not one."""
     spot: float
     or_high: float
     or_low: float
@@ -50,6 +50,9 @@ class IndexPlan:
     retested: bool
     holding: bool
     extended: bool
+    name: str = "NIFTY 50"
+    index_symbol: str = "NIFTY"
+    direction: str = "CALL"               # "CALL" or "PUT"
     entry_low: float | None = None
     entry_high: float | None = None
     stop: float | None = None
@@ -62,13 +65,14 @@ class IndexPlan:
 
     @property
     def status(self) -> str:
+        tag = "BREAKDOWN" if self.direction == "PUT" else "BREAKOUT"
         if not self.breakout:
-            return "NO BREAKOUT"
+            return f"NO {tag}"
         if self.extended:
-            return "BREAKOUT — EXTENDED"
+            return f"{tag} — EXTENDED"
         if self.retested and self.holding:
-            return "BREAKOUT → RETEST → HOLD"
-        return "BREAKOUT (no retest yet)" if self.holding else "BREAKOUT LOST"
+            return f"{tag} → RETEST → HOLD"
+        return f"{tag} (no retest yet)" if self.holding else f"{tag} LOST"
 
     @property
     def tradeable(self) -> bool:
@@ -77,8 +81,9 @@ class IndexPlan:
 
 
 def analyse(df: pd.DataFrame, now: datetime, market: MarketContext,
-            chain: list) -> IndexPlan | None:
-    """Read NIFTY's own opening-range structure and price a call on it."""
+            chain: list, *, index_symbol: str = "NIFTY",
+            name: str = "NIFTY 50", side: str | None = None) -> IndexPlan | None:
+    """Read index opening-range structure and price a Call or Put option on it."""
     bars = ind.closed_bars(df, now)
     if bars.empty:
         return None
@@ -97,8 +102,72 @@ def analyse(df: pd.DataFrame, now: datetime, market: MarketContext,
     ema_f = float(ind.ema(closes, C.EMA_FAST).iloc[-1]) if len(closes) >= C.EMA_FAST else None
     ema_s = float(ind.ema(closes, C.EMA_SLOW).iloc[-1]) if len(closes) >= C.EMA_SLOW else None
     spot = float(today["Close"].iloc[-1])
-
     post = ind.after_opening_range(today)
+
+    # Determine whether we evaluate a PUT breakdown or CALL breakout
+    is_put = (side == "PUT" or (side is None and market.classification in ("BEARISH", "STRONGLY BEARISH") and spot < or_low))
+    direction = "PUT" if is_put else "CALL"
+
+    if is_put:
+        trigger = or_low - BREAKOUT_BUFFER_ATR * atr
+        broke = post[post["Close"] < trigger]
+        breakout = not broke.empty
+        holding = breakout and spot < or_low
+        after = post[post.index >= broke.index[0]] if breakout else post.iloc[0:0]
+        band = or_low - C.RETEST_TOLERANCE_ATR * atr
+        touched = after.iloc[1:][(after.iloc[1:]["High"] >= band)
+                                 & (after.iloc[1:]["Close"] < or_low)] if len(after) > 1 else after.iloc[0:0]
+        retested = not touched.empty
+        extended = breakout and (or_low - spot) > EXTENDED_ATR * atr
+
+        plan = IndexPlan(spot=spot, or_high=or_high, or_low=or_low, atr=atr,
+                         ema_fast=ema_f, ema_slow=ema_s,
+                         day_high=float(today["High"].max()),
+                         day_low=float(today["Low"].min()),
+                         breakout=breakout, retested=retested, holding=holding,
+                         extended=extended, name=name, index_symbol=index_symbol,
+                         direction="PUT")
+        plan.caveats.append("an index publishes no volume, so VWAP, relative volume "
+                            "and breakout-volume confirmation are unavailable")
+
+        if not breakout:
+            plan.rejections.append(f"{name} has not closed below its 09:15–09:30 low ({or_low:.2f})")
+            return plan
+        if not holding:
+            plan.rejections.append(f"the breakdown of {or_low:.2f} is not holding")
+            return plan
+        if extended:
+            plan.rejections.append(f"{name} is {or_low - spot:.0f} points below the level — chase")
+        if market.classification in ("BULLISH", "STRONGLY BULLISH"):
+            plan.rejections.append(f"market context is {market.classification} — put fights the tape")
+        if ema_f and ema_s and ema_f > ema_s:
+            plan.rejections.append("the 20 EMA is above the 50 EMA — trend does not support a short")
+
+        entry_high, entry_low = or_low, or_low - 0.40 * atr
+        stop_base = (float(touched["High"].max()) if retested
+                     else float(after["High"].iloc[0]) if len(after) else or_high)
+        stop = stop_base + C.SL_BUFFER_ATR * atr
+        entry = max(min(spot, entry_high), entry_low)
+        risk = stop - entry
+        if risk <= 0:
+            plan.rejections.append("no structural stop above the entry")
+            return plan
+        plan.entry_low, plan.entry_high = entry_low, entry_high
+        plan.stop = stop
+        plan.target1 = entry - C.TARGET_RR_1 * risk
+        plan.target2 = entry - C.TARGET_RR_2 * risk
+
+        plan.reasons.append(f"closed below the 09:15–09:30 low {or_low:.2f}"
+                            + (" and retested it" if retested else " (no retest yet)"))
+        if ema_f and ema_s and spot < ema_f < ema_s:
+            plan.reasons.append(f"EMA stack is bearish — {spot:.0f} < {ema_f:.0f} < {ema_s:.0f}")
+
+        plan.option = opt_mod.plan_put(index_symbol, chain, spot=spot,
+                                       target1=plan.target1, target2=plan.target2,
+                                       stop=plan.stop, now=now, today=now.date())
+        return plan
+
+    # Call breakout logic
     trigger = or_high + BREAKOUT_BUFFER_ATR * atr
     broke = post[post["Close"] > trigger]
     breakout = not broke.empty
@@ -115,21 +184,22 @@ def analyse(df: pd.DataFrame, now: datetime, market: MarketContext,
                      day_high=float(today["High"].max()),
                      day_low=float(today["Low"].min()),
                      breakout=breakout, retested=retested, holding=holding,
-                     extended=extended)
+                     extended=extended, name=name, index_symbol=index_symbol,
+                     direction="CALL")
     plan.caveats.append("an index publishes no volume, so VWAP, relative volume "
                         "and breakout-volume confirmation are unavailable — this "
                         "is a five-factor read, not the stock scanner's eight")
 
     if not breakout:
         plan.rejections.append(
-            f"NIFTY has not closed above its 09:15–09:30 high ({or_high:.2f})")
+            f"{name} has not closed above its 09:15–09:30 high ({or_high:.2f})")
         return plan
     if not holding:
         plan.rejections.append(f"the break of {or_high:.2f} is not holding")
         return plan
     if extended:
         plan.rejections.append(
-            f"NIFTY is {spot - or_high:.0f} points above the level — more than "
+            f"{name} is {spot - or_high:.0f} points above the level — more than "
             f"{EXTENDED_ATR:g} ATR, so this is a chase")
     if market.classification in ("BEARISH", "STRONGLY BEARISH"):
         plan.rejections.append(
@@ -166,18 +236,20 @@ def analyse(df: pd.DataFrame, now: datetime, market: MarketContext,
     if strong:
         plan.reasons.append("sectors participating: " + ", ".join(sorted(strong)[:4]))
 
-    plan.option = opt_mod.plan_call("NIFTY", chain, spot=spot,
+    plan.option = opt_mod.plan_call(index_symbol, chain, spot=spot,
                                     target1=plan.target1, target2=plan.target2,
                                     stop=plan.stop, now=now, today=now.date())
     return plan
 
 
 def render(plan: IndexPlan | None) -> str:
-    """The NIFTY block for the terminal report."""
+    """Terminal block for the index option setup."""
     if plan is None:
         return ("NIFTY 50 OPTIONS\n  no intraday index candles for today — "
                 "nothing to read")
-    L = ["NIFTY 50 OPTIONS",
+    kind = "CE" if plan.direction == "CALL" else "PE"
+    kind_label = "Call option" if plan.direction == "CALL" else "Put option"
+    L = [f"{plan.name.upper()} OPTIONS",
          f"  Spot:              {plan.spot:.2f}",
          f"  09:15–09:30:       {plan.or_low:.2f} – {plan.or_high:.2f}   "
          f"(ATR {plan.atr:.2f}, day {plan.day_low:.2f}–{plan.day_high:.2f})",
@@ -190,13 +262,13 @@ def render(plan: IndexPlan | None) -> str:
               f"  Index targets:     {plan.target1:.2f} (1:2) / {plan.target2:.2f} (1:3)"]
     o = plan.option
     if o is None:
-        L.append("  Call option:       not evaluated — no index levels to price against")
+        L.append(f"  {kind_label}:       not evaluated — no index levels to price against")
     elif o.quote is None:
-        L.append("  Call option:       NO CALL — "
+        L.append(f"  {kind_label}:       NO {kind} — "
                  + (o.rejections[0] if o.rejections else "no candidate strike"))
     else:
         q = o.quote
-        L += [f"  Call option:       {q.strike:g} CE @ {q.last_price:.2f} "
+        L += [f"  {kind_label}:       {q.strike:g} {kind} @ {q.last_price:.2f} "
               f"({q.expiry}, {q.moneyness})",
               f"    Breakeven:       {o.breakeven:.2f} if held to expiry",
               f"    Contract:        OI {q.open_interest:,.0f}, "

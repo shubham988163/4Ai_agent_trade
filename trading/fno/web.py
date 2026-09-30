@@ -24,9 +24,8 @@ from trading import ui_theme
 from trading.fno import config as C
 from trading.fno import fyers
 from trading.fno import report
-from trading.fno.data import LiveFeed, ReplayFeed
+from trading.fno.live import run_scan
 from trading.fno.models import IST
-from trading.fno.scanner import Scanner
 
 DEFAULT_TTL = 120          # seconds before a cached scan is considered stale
 
@@ -109,22 +108,9 @@ class ScanCache:
                 self._finished = datetime.now(IST)
 
     def _scan_now(self) -> dict:
-        if self.replay:
-            feed = ReplayFeed(self.replay)
-            now, allow_delayed = feed.as_of, True
-        else:
-            from trading.fno.fyers import load_token, FyersFeed, FyersClient
-            token, _ = load_token()
-            client = FyersClient(base=self.fyers_base)
-            is_connected, _ = client.status()
-            if self.fyers or token is not None or is_connected:
-                feed = FyersFeed(base=self.fyers_base)
-                now, allow_delayed = datetime.now(IST), True
-            else:
-                feed = LiveFeed()
-                now, allow_delayed = datetime.now(IST), self.allow_delayed
-        res = Scanner(feed, now, allow_delayed=allow_delayed,
-                      symbols=self.symbols, shortlist=self.shortlist).run()
+        res = run_scan(symbols=self.symbols, shortlist=self.shortlist,
+                       replay=self.replay, allow_delayed=self.allow_delayed,
+                       fyers=self.fyers, fyers_base=self.fyers_base)
         return report.as_dict(res)
 
 
@@ -777,6 +763,7 @@ function nifty(s){
   const wrap = $("#niftyWrap");
   wrap.replaceChildren();
   if(s.index_options) wrap.append(niftyPanel(s.index_options, num));
+  if(s.banknifty_options) wrap.append(niftyPanel(s.banknifty_options, num));
   const ctx = contextPanel(s.chain, s.pivots, num);
   if(ctx) wrap.append(ctx);
 }
@@ -1013,6 +1000,52 @@ function card(c){
     }
   };
   btnsWrap.append(tBtn);
+
+  if(c.options && c.options.quote){
+    const optQ = c.options.quote;
+    const kind = optQ.option_type === "Put" ? "PE" : "CE";
+    const optBtn = el("button","btn go","🎯 Buy " + optQ.strike + " " + kind);
+    optBtn.style.fontSize = "11px";
+    optBtn.style.padding = "3px 9px";
+    optBtn.style.background = "linear-gradient(135deg, #10b981, #059669)";
+    optBtn.onclick = async (e)=>{
+      e.stopPropagation();
+      optBtn.disabled = true;
+      optBtn.textContent = "Placing…";
+      try {
+        const res = await fetch("/api/trade", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({
+            symbol: optQ.identifier || c.symbol + optQ.strike + kind,
+            underlying: c.symbol,
+            side: "BUY",
+            is_option: true,
+            option_type: kind,
+            price: optQ.ltp,
+            stop_loss: c.options.premium_at_stop || (optQ.ltp * 0.7),
+            target: c.options.premium_at_t1 || (optQ.ltp * 1.5),
+            strategy_id: "fno_stock_option"
+          })
+        });
+        const j = await res.json();
+        if(j.ok){
+          optBtn.style.background = "var(--good)";
+          optBtn.textContent = "✓ Option #" + j.trade_id + "!";
+          setTimeout(()=>{ optBtn.textContent="🎯 Buy " + optQ.strike + " " + kind; optBtn.disabled=false; optBtn.style.background="linear-gradient(135deg, #10b981, #059669)"; }, 2500);
+        } else {
+          alert("Option order rejected: " + (j.reason || j.error || "Unknown"));
+          optBtn.disabled = false;
+          optBtn.textContent = "🎯 Buy " + optQ.strike + " " + kind;
+        }
+      } catch(err){
+        alert("Error: " + err);
+        optBtn.disabled = false;
+        optBtn.textContent = "🎯 Buy " + optQ.strike + " " + kind;
+      }
+    };
+    btnsWrap.append(optBtn);
+  }
 
   const aiBtn = el("button","btn","🤖 AI Debate");
   aiBtn.style.fontSize = "11px";

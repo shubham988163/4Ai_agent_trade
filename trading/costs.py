@@ -135,6 +135,78 @@ def check_cost_floor(
     return (ratio <= limit), ratio
 
 
+# --- rate card: NSE equity options, Zerodha / Fyers schedule ---
+OPTIONS_BROKERAGE_PER_ORDER = 20.0  # Rs 20 per executed order (buy Rs 20, sell Rs 20 = Rs 40 round trip)
+OPTIONS_STT_PCT_SELL = 0.001        # 0.1% on sell-side premium value (revised SEBI rate)
+OPTIONS_EXCHANGE_TXN_PCT = 0.0005   # 0.05% of premium turnover, NSE, both sides
+OPTIONS_SEBI_PCT = 0.000001         # Rs 10 per crore (0.0001%), both sides
+OPTIONS_STAMP_PCT_BUY = 0.00003     # 0.003% on buy-side premium value
+OPTIONS_GST_PCT = 0.18              # 18% on (brokerage + exchange + sebi)
+
+
+@dataclass
+class OptionCostBreakdown:
+    brokerage: float
+    stt: float
+    exchange: float
+    sebi: float
+    stamp: float
+    gst: float
+
+    @property
+    def total(self) -> float:
+        return self.brokerage + self.stt + self.exchange + self.sebi + self.stamp + self.gst
+
+    def __str__(self) -> str:
+        return (f"brokerage {self.brokerage:.2f} + STT {self.stt:.2f} + exch {self.exchange:.2f}"
+                f" + SEBI {self.sebi:.2f} + stamp {self.stamp:.2f} + GST {self.gst:.2f}"
+                f" = {self.total:.2f}")
+
+
+def options_breakdown(entry_premium: float, exit_premium: float, qty: int) -> OptionCostBreakdown:
+    """Itemised round-trip transaction costs for an NSE option trade."""
+    buy_value = max(0.0, entry_premium) * qty
+    sell_value = max(0.0, exit_premium) * qty
+    premium_turnover = buy_value + sell_value
+    brokerage = OPTIONS_BROKERAGE_PER_ORDER * 2.0  # buy + sell order
+    stt = OPTIONS_STT_PCT_SELL * sell_value
+    exchange = OPTIONS_EXCHANGE_TXN_PCT * premium_turnover
+    sebi = OPTIONS_SEBI_PCT * premium_turnover
+    stamp = OPTIONS_STAMP_PCT_BUY * buy_value
+    gst = OPTIONS_GST_PCT * (brokerage + exchange + sebi)
+    return OptionCostBreakdown(
+        brokerage=brokerage,
+        stt=stt,
+        exchange=exchange,
+        sebi=sebi,
+        stamp=stamp,
+        gst=gst,
+    )
+
+
+def options_round_trip(entry_premium: float, exit_premium: float, qty: int) -> float:
+    """Total round-trip charges in INR for an option trade."""
+    return options_breakdown(entry_premium, exit_premium, qty).total
+
+
+def check_option_cost_floor(
+    entry_premium: float,
+    stop_premium: float,
+    qty: int = 1,
+    max_ratio: float = 0.30,
+) -> tuple[bool, float]:
+    """Verify that option transaction friction does not exceed max_ratio (30%) of premium risk."""
+    if entry_premium <= 0 or qty <= 0:
+        return False, float("inf")
+    risk_pts = abs(entry_premium - stop_premium)
+    if risk_pts <= 0:
+        return False, float("inf")
+    total_risk = risk_pts * qty
+    charges = options_round_trip(entry_premium, entry_premium, qty)
+    ratio = charges / total_risk if total_risk > 0 else float("inf")
+    return (ratio <= max_ratio), ratio
+
+
 if __name__ == "__main__":
     print(f"{'position':>12} {'qty':>5} {'charges':>9} {'as %':>7} {'breakeven move':>15}")
     for price, qty in [(1300, 6), (1300, 19), (1323, 151), (1300, 400)]:

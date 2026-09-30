@@ -111,10 +111,20 @@ class Scanner:
 
     def attach_options(self, cand: Candidate) -> None:
         """A call plan only makes sense once the stock has real targets."""
-        if not self.option_board or cand.trade is None:
+        if cand.trade is None:
+            return
+        board = self.option_board
+        if hasattr(self.feed, "stock_option_board"):
+            try:
+                stock_board = self.feed.stock_option_board(cand.symbol)
+                if stock_board:
+                    board = stock_board
+            except Exception:
+                pass
+        if not board:
             return
         cand.option_plan = opt_mod.plan_call(
-            cand.symbol, self.option_board, spot=cand.levels.price,
+            cand.symbol, board, spot=cand.levels.price,
             target1=cand.trade.target1, target2=cand.trade.target2,
             stop=cand.trade.stop, now=self.now, today=self.now.date())
 
@@ -265,21 +275,35 @@ class Scanner:
             notes.append("Nothing could be graded this run — see the skip reasons "
                          "above. Outside market hours this is expected.")
 
-        index_plan = chain_read = piv = gap = None
-        if data_ok and self.with_options and hasattr(self.feed, "index_option_board"):
+        index_plan = banknifty_plan = chain_read = piv = gap = None
+        if data_ok and self.with_options:
+            if hasattr(self.feed, "index_option_board"):
+                try:
+                    chain = self.feed.index_option_board()
+                    nifty = self.feed.index_candles(C.NIFTY_TICKER)
+                    if nifty is not None:
+                        index_plan = ix_mod.analyse(nifty.df, self.now, market, chain,
+                                                    index_symbol="NIFTY", name="NIFTY 50")
+                        bars = ind.closed_bars(nifty.df, self.now)
+                        if not bars.empty:
+                            day = ind.sessions(bars)[-1]
+                            piv = pv_mod.from_candles(bars, day)
+                            gap = pv_mod.gap(bars, day)
+                    chain_read = ca_mod.analyse(chain, "NIFTY", self.now.date())
+                except Exception as exc:                    # noqa: BLE001
+                    notes.append(f"NIFTY option read failed: {exc}")
+
+            # BANK NIFTY option setup
             try:
-                chain = self.feed.index_option_board()
-                nifty = self.feed.index_candles(C.NIFTY_TICKER)
-                if nifty is not None:
-                    index_plan = ix_mod.analyse(nifty.df, self.now, market, chain)
-                    bars = ind.closed_bars(nifty.df, self.now)
-                    if not bars.empty:
-                        day = ind.sessions(bars)[-1]
-                        piv = pv_mod.from_candles(bars, day)
-                        gap = pv_mod.gap(bars, day)
-                chain_read = ca_mod.analyse(chain, "NIFTY", self.now.date())
-            except Exception as exc:                    # noqa: BLE001
-                notes.append(f"NIFTY option read failed: {exc}")
+                bank_chain = (self.feed.banknifty_option_board()
+                              if hasattr(self.feed, "banknifty_option_board")
+                              else getattr(self, "option_board", []))
+                bank_candles = self.feed.index_candles(C.BANKNIFTY_TICKER)
+                if bank_candles is not None:
+                    banknifty_plan = ix_mod.analyse(bank_candles.df, self.now, market, bank_chain,
+                                                    index_symbol="BANKNIFTY", name="BANK NIFTY")
+            except Exception as exc:                        # noqa: BLE001
+                notes.append(f"BANK NIFTY option read failed: {exc}")
 
         candidates.sort(key=lambda c: (c.tradeable, c.score, c.rel_strength),
                         reverse=True)
@@ -289,5 +313,5 @@ class Scanner:
                           window_note=win.note, market=market,
                           candidates=candidates, considered=len(shortlist),
                           data_ok=data_ok, data_notes=notes,
-                          index_plan=index_plan, chain_read=chain_read,
-                          pivots=piv, gap=gap)
+                          index_plan=index_plan, banknifty_plan=banknifty_plan,
+                          chain_read=chain_read, pivots=piv, gap=gap)

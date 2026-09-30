@@ -120,13 +120,9 @@ class NSEClient:
         data = self.get("/api/liveEquity-derivatives", {"index": "stock_opt"})
         return data.get("data", []) or [], data.get("timestamp")
 
-    def index_options(self) -> tuple[list[dict], str | None]:
-        """The full NIFTY option chain — every strike and expiry.
-
-        Note the index name: `nifty_opt` answers HTTP 500, `nse50_opt` serves
-        the chain. Undocumented and easy to get wrong.
-        """
-        data = self.get("/api/liveEquity-derivatives", {"index": "nse50_opt"})
+    def index_options(self, index: str = "nse50_opt") -> tuple[list[dict], str | None]:
+        """The full NIFTY or BANK NIFTY option chain — every strike and expiry."""
+        data = self.get("/api/liveEquity-derivatives", {"index": index})
         return data.get("data", []) or [], data.get("timestamp")
 
     def all_indices(self) -> tuple[list[dict], str | None]:

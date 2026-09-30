@@ -260,6 +260,7 @@ def as_dict(res: ScanResult) -> dict:
             "sources": [_prov(p, res.when) for p in res.market.sources],
         },
         "index_options": _index_plan(res.index_plan),
+        "banknifty_options": _index_plan(getattr(res, "banknifty_plan", None)),
         "chain": _chain_read(res.chain_read),
         "pivots": _pivots(res.pivots, res.gap),
         "picks": [_cand(c, res.when, i + 1) for i, c in enumerate(res.picks)],

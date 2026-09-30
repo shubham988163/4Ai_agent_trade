@@ -152,6 +152,21 @@ class FyersClient:
 
     def status(self) -> tuple[bool, str]:
         """(connected, human-readable reason)."""
+        # 0. If a custom base was explicitly specified, check it
+        if self.base != DEFAULT_BASE:
+            try:
+                data = self._get("/api/fyers/status")
+                if data.get("connected"):
+                    prof = (data.get("profile") or {}).get("name") or "connected"
+                    return True, f"Fyers live ({prof})"
+                if data.get("expired"):
+                    return False, "Fyers token expired — please re-authenticate"
+                return False, f"cannot reach the Fyers server at {self.base}"
+            except FyersError as exc:
+                return False, str(exc)
+            except Exception as exc:
+                return False, f"cannot reach the Fyers server at {self.base} ({exc})"
+
         # 1. Check direct token first
         token, prof = load_token()
         if token:
@@ -231,18 +246,19 @@ class FyersClient:
                     return res["d"]
             except Exception:
                 pass
-            return []
-        # 2. Proxy query (only if not self-referential)
-        if "localhost:3001" not in self.base and "127.0.0.1:3001" not in self.base:
+        return []
+
+    def option_chain(self, symbol: str, strikecount: int = 10) -> dict | None:
+        """Fetch real-time option chain for an index or stock from Fyers."""
+        model = self._get_direct_model()
+        if model:
             try:
-                data = self._get("/api/fyers/quotes", {"symbols": sym_str})
-                if isinstance(data, dict) and data.get("s") == "ok" and "d" in data:
-                    return data["d"]
-                if isinstance(data, list):
-                    return data
+                res = model.optionchain(data={"symbol": symbol, "strikecount": strikecount})
+                if isinstance(res, dict) and res.get("s") == "ok" and "data" in res:
+                    return res["data"]
             except Exception:
                 pass
-        return []
+        return None
 
 
 def to_frame(candles: list[dict]) -> pd.DataFrame | None:
@@ -342,6 +358,70 @@ class FyersFeed(LiveFeed):
         got = self._fetch(mapped, ticker)
         return got if got is not None else (
             super().index_candles(ticker) if self.fallback else None)
+
+    def _fyers_to_option_quotes(self, data: dict, underlying_name: str) -> list:
+        from trading.fno.options import OptionQuote
+        chain = data.get("optionsChain") or []
+        expiry_data = data.get("expiryData") or []
+        front_expiry = expiry_data[0].get("date") if expiry_data else ""
+        spot = None
+        for it in chain:
+            if it.get("strike_price") == -1:
+                spot = float(it.get("ltp") or 0)
+                break
+
+        out = []
+        now = datetime.now(IST)
+        for it in chain:
+            strike = it.get("strike_price")
+            opt_type = it.get("option_type")
+            if strike is None or strike == -1 or not opt_type:
+                continue
+            sym = it.get("symbol", "")
+            kind = "Call" if opt_type == "CE" else "Put"
+            ltp = float(it.get("ltp") or 0)
+            oi = float(it.get("oi") or 0)
+            vol = float(it.get("volume") or 0)
+            pchange = float(it.get("ltpchp") or 0)
+            out.append(OptionQuote(
+                underlying=underlying_name,
+                identifier=sym,
+                option_type=kind,
+                strike=float(strike),
+                expiry=front_expiry or "near",
+                last_price=ltp,
+                pct_change=pchange,
+                open_interest=oi,
+                volume=vol,
+                underlying_value=spot,
+                prov=Provenance(self.source_candles, sym, "option_chain", now, now)
+            ))
+        return out
+
+    def index_option_board(self, ticker: str = "^NSEI") -> list:
+        if self.connected:
+            mapped = INDEX_SYMBOLS.get(ticker, "NSE:NIFTY50-INDEX")
+            name = "BANKNIFTY" if "BANK" in mapped else "NIFTY"
+            data = self.client.option_chain(mapped, strikecount=12)
+            if data:
+                return self._fyers_to_option_quotes(data, name)
+        return super().index_option_board()
+
+    def banknifty_option_board(self) -> list:
+        if self.connected:
+            data = self.client.option_chain("NSE:NIFTYBANK-INDEX", strikecount=12)
+            if data:
+                return self._fyers_to_option_quotes(data, "BANKNIFTY")
+        return super().banknifty_option_board()
+
+    def stock_option_board(self, symbol: str) -> list:
+        if self.connected:
+            fyers_sym = f"NSE:{symbol}-EQ" if not symbol.startswith("NSE:") else symbol
+            clean_sym = symbol.replace("NSE:", "").replace("-EQ", "")
+            data = self.client.option_chain(fyers_sym, strikecount=8)
+            if data:
+                return self._fyers_to_option_quotes(data, clean_sym)
+        return super().stock_option_board(symbol)
 
 
 # --- Built-in OAuth Server on port 3001 ---

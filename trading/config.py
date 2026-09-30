@@ -116,6 +116,26 @@ SUPERVISOR_POLL_SECONDS = 5     # how often the async supervisor checks for new 
 AGENT_MIN_CONVICTION = 7        # Conviction score out of 10 required to execute a trade
 AGENT_MAX_TRADES_PER_SCAN = 3   # Max new trades to execute in a single scan pass
 
+# --- AI agent: the F&O long scanner as a second candidate source ---
+# The scanner (trading/fno/) and the agent were two disjoint pipelines: the
+# scanner printed BUY/WATCH cards that nothing ever traded. When enabled, the
+# agent reads the scanner's verdicts AND its plan (entry band, structural stop,
+# 1:2 / 1:3 targets) and runs them through the same council and risk kernel.
+# Opt-in and OFF by default, like TRAIL_ENABLED: nothing changes until flipped.
+AGENT_SCANNER_ENABLED = False
+# Deliberately NOT an "orb_ma200*" id, so ExecutionRouter.risk_check's 200MA
+# trend gate does not apply to it -- the same pattern ema_9_21 and avwap_scalp
+# already use. The agent re-applies that gate itself before routing; see
+# scanner_preflight() in agents/agent_trader.py. Do not retire the agent-side
+# check on the assumption the router is covering it.
+AGENT_SCANNER_STRATEGY_ID = "fno_scanner"
+AGENT_SCANNER_TIERS = ("BUY", "WATCH")   # ("BUY",) would be the BUY picks only
+AGENT_SCANNER_MAX = 3                    # names taken from one scan per pass
+# Enter only while price is inside the scanner's own entry band. A WATCH name
+# is usually sitting above its band already -- that is part of why it is only
+# on watch -- so this flag decides whether the agent chases them or skips them.
+AGENT_SCANNER_REQUIRE_ENTRY_BAND = True
+
 
 # Safe defaults used whenever the pre-market agent fails or returns invalid output
 FALLBACK_DAY_CONFIG = {
@@ -124,3 +144,38 @@ FALLBACK_DAY_CONFIG = {
     "blocked_symbols": [],
     "rationale": "fallback: pre-market agent unavailable — trading at half size",
 }
+
+# --- Options Trading Settings ---
+INDEX_LOT_SIZES: dict[str, int] = {
+    "NIFTY": 75,
+    "NIFTY 50": 75,
+    "NSE:NIFTY50-INDEX": 75,
+    "BANKNIFTY": 30,
+    "BANK NIFTY": 30,
+    "NSE:NIFTYBANK-INDEX": 30,
+    "FINNIFTY": 65,
+    "MIDCPNIFTY": 120,
+}
+
+STOCK_LOT_SIZES: dict[str, int] = {
+    "RELIANCE": 250,
+    "HDFCBANK": 550,
+    "ICICIBANK": 700,
+    "INFY": 400,
+    "TCS": 175,
+    "SBIN": 750,
+    "BHARTIARTL": 475,
+    "ITC": 1600,
+    "LT": 175,
+    "AXISBANK": 625,
+    "KOTAKBANK": 400,
+    "TATAMOTORS": 550,
+    "TATASTEEL": 5500,
+    "BAJFINANCE": 125,
+    "MARUTI": 50,
+}
+
+DEFAULT_STOCK_OPTION_LOT = 250
+MAX_OPTION_POSITION_VALUE = 75000.0
+MAX_OPTION_RISK_PER_TRADE = 2500.0
+

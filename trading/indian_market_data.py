@@ -145,11 +145,15 @@ def filter_curated_news(
     raw_news: list[dict],
     symbol: str,
     max_items: int = 5,
-) -> tuple[list[dict], str]:
+) -> tuple[list[dict], str, list[dict]]:
     """Filter news items against curated aliases, negative keywords, and publisher whitelist."""
     meta = WATCHLIST_METADATA.get(symbol)
     if not meta:
-        return [], "No news available (untracked symbol)"
+        # The third element is the audit log. Omitting it here used to raise
+        # "not enough values to unpack" for EVERY symbol outside the 6-name
+        # watchlist -- i.e. every Nifty-50 name and every scanner candidate --
+        # which fetch_symbol_context swallows into a bare "no market data".
+        return [], "No news available (untracked symbol)", []
 
     aliases = meta["aliases"]
     negative_kws = meta["negative_keywords"]

@@ -35,7 +35,7 @@ IST = ZoneInfo("Asia/Kolkata")
 
 
 def _get_batch_ltp(symbols: list[str]) -> dict[str, float]:
-    """Fetch real-time LTP for a list of equity symbols using Fyers, falling back to yfinance."""
+    """Fetch real-time LTP for a list of equity, index & option symbols using Fyers, falling back to yfinance."""
     if not symbols:
         return {}
     res: dict[str, float] = {}
@@ -43,21 +43,43 @@ def _get_batch_ltp(symbols: list[str]) -> dict[str, float]:
     try:
         from trading.fno.fyers import FyersClient
         client = FyersClient()
-        fyers_syms = [f"NSE:{s}-EQ" if not s.startswith("NSE:") else s for s in clean_syms]
+        fyers_syms = []
+        sym_map: dict[str, str] = {}
+        for s in clean_syms:
+            if s.startswith("NSE:") or s.startswith("MCX:"):
+                fs = s
+            elif s in ("NIFTY", "NIFTY50", "NIFTY 50", "^NSEI"):
+                fs = "NSE:NIFTY50-INDEX"
+            elif s in ("BANKNIFTY", "BANK NIFTY", "^NSEBANK"):
+                fs = "NSE:NIFTYBANK-INDEX"
+            elif "CE" in s or "PE" in s or "OPT" in s:
+                fs = f"NSE:{s}"
+            else:
+                fs = f"NSE:{s}-EQ"
+            fyers_syms.append(fs)
+            sym_map[fs] = s
+
         quotes = client.quotes(fyers_syms)
         for q in quotes:
             if isinstance(q, dict) and "v" in q and "lp" in q["v"]:
                 name = q.get("n", "")
-                raw = name.replace("NSE:", "").replace("-EQ", "")
-                res[raw] = float(q["v"]["lp"])
+                raw = name.replace("NSE:", "").replace("-EQ", "").replace("-INDEX", "")
+                lp = float(q["v"]["lp"])
+                res[raw] = lp
+                res[name] = lp
+                res[raw.strip()] = lp
+                res[name.strip()] = lp
+                if name in sym_map:
+                    res[sym_map[name]] = lp
     except Exception:
         pass
 
-    missing = [s for s in clean_syms if s not in res]
+    missing = [s for s in clean_syms if s not in res and not ("CE" in s or "PE" in s)]
     if missing:
         for s in missing:
             try:
-                t = yf.Ticker(s + ".NS")
+                yf_sym = "^NSEI" if s in ("NIFTY", "NIFTY50") else "^NSEBANK" if s in ("BANKNIFTY", "BANK NIFTY") else s + ".NS"
+                t = yf.Ticker(yf_sym)
                 hist = t.history(period="1d", interval="5m")
                 if not hist.empty and "Close" in hist.columns:
                     res[s] = float(hist["Close"].iloc[-1])
@@ -68,7 +90,8 @@ def _get_batch_ltp(symbols: list[str]) -> dict[str, float]:
 
 def _get_ltp(symbol: str) -> float:
     batch = _get_batch_ltp([symbol])
-    return batch.get(symbol.upper().strip(), 1000.0)
+    s = symbol.upper().strip()
+    return batch.get(s) or batch.get(s.replace("NSE:", "")) or 1000.0
 
 
 def _breakdown(trades: list[dict], key: str) -> list[dict]:
@@ -104,9 +127,91 @@ def _breakdown(trades: list[dict], key: str) -> list[dict]:
 def _handle_trade(data: dict) -> dict:
     ledger = Ledger()
     router = ExecutionRouter(mode="paper", ledger=ledger)
-    sym = str(data.get("symbol", "RELIANCE")).upper().strip()
+    raw_sym = str(data.get("symbol", "RELIANCE")).upper().strip()
     side = str(data.get("side", "BUY")).upper().strip()
     qty = int(data.get("qty", 10))
+    inst_type = str(data.get("instrument_type", "equity")).lower()
+    opt_type = str(data.get("option_type", "")).upper()
+
+    is_option = (
+        inst_type == "option"
+        or opt_type in ("CE", "PE", "CALL", "PUT")
+        or "CE" in raw_sym
+        or "PE" in raw_sym
+        or data.get("is_option") is True
+    )
+
+    if is_option:
+        # Check if raw_sym is an underlying or a direct option identifier
+        is_direct_option = ("CE" in raw_sym or "PE" in raw_sym) and any(c.isdigit() for c in raw_sym)
+
+        if not is_direct_option and (inst_type == "option" or opt_type in ("CE", "PE")):
+            from trading.options_engine import select_option_for_underlying, get_lot_size
+            underlying = raw_sym
+            opt_side = "BUY" if opt_type in ("CE", "CALL") or side == "BUY" else "SELL"
+            spot_px = float(data["price"]) if data.get("price") else _get_ltp(underlying)
+            sl_in = float(data["stop_loss"]) if data.get("stop_loss") else None
+            tg_in = float(data["target"]) if data.get("target") else None
+
+            opt_signal = select_option_for_underlying(
+                symbol=underlying,
+                side=opt_side,
+                spot_price=spot_px,
+                stop_loss=sl_in,
+                target=tg_in,
+            )
+            if not opt_signal:
+                return {
+                    "ok": False,
+                    "rejected": True,
+                    "reason": f"Could not find liquid option chain for {underlying}",
+                }
+            if data.get("qty") and int(data["qty"]) > 1:
+                lot_unit = get_lot_size(underlying)
+                req_qty = int(data["qty"])
+                opt_signal["qty"] = max(lot_unit, (req_qty // lot_unit) * lot_unit if req_qty >= lot_unit else lot_unit)
+            opt_signal["strategy_id"] = str(data.get("strategy_id", "manual_option_paper"))
+            opt_signal["regime"] = router.day_config.get("regime", "choppy")
+            trade_id = router.execute(opt_signal)
+            if trade_id is None:
+                reason = getattr(router, "last_rejection", "Risk kernel rejection")
+                return {"ok": False, "rejected": True, "reason": reason}
+            return {"ok": True, "trade_id": trade_id, "signal": opt_signal}
+
+        sym = raw_sym if raw_sym.startswith("NSE:") else f"NSE:{raw_sym}"
+        price = float(data["price"]) if data.get("price") else None
+        if price is None or price <= 0:
+            price = _get_ltp(sym)
+        router.get_ltp = lambda s: price
+
+        sl = float(data["stop_loss"]) if data.get("stop_loss") else None
+        tg = float(data["target"]) if data.get("target") else None
+        if sl is None and price > 0:
+            sl = round(price * 0.70, 2)
+        if tg is None and price > 0:
+            tg = round(price * 1.50, 2)
+
+        signal = {
+            "symbol": sym,
+            "side": "BUY",  # Option buyer pays premium
+            "qty": qty,
+            "price": price,
+            "ts": time.time(),
+            "stop_loss": sl,
+            "target": tg,
+            "is_option": True,
+            "instrument_type": "option",
+            "strategy_id": str(data.get("strategy_id", "manual_option_paper")),
+            "regime": router.day_config.get("regime", "choppy"),
+        }
+        trade_id = router.execute(signal)
+        if trade_id is None:
+            reason = getattr(router, "last_rejection", "Risk kernel rejection")
+            return {"ok": False, "rejected": True, "reason": reason}
+        return {"ok": True, "trade_id": trade_id, "signal": signal}
+
+    # Standard Equity
+    sym = raw_sym
     price = float(data["price"]) if data.get("price") else None
     if price is None or price <= 0:
         price = _get_ltp(sym)
@@ -151,7 +256,14 @@ def _handle_close(data: dict) -> dict:
     if exit_price is None or exit_price <= 0:
         exit_price = _get_ltp(t["symbol"])
 
-    charges = round_trip_charges(t["entry_price"], exit_price, t["qty"])
+    sym = t["symbol"]
+    is_opt = ("CE" in sym or "PE" in sym or "OPT" in sym)
+    if is_opt:
+        from trading.costs import options_round_trip
+        charges = options_round_trip(t["entry_price"], exit_price, t["qty"])
+    else:
+        charges = round_trip_charges(t["entry_price"], exit_price, t["qty"])
+
     pnl = ledger.record_exit(trade_id, round(exit_price, 2), charges=round(charges, 2))
     return {"ok": True, "trade_id": trade_id, "exit_price": round(exit_price, 2), "pnl": round(pnl, 2)}
 
@@ -319,7 +431,12 @@ def get_data(date: str | None) -> dict:
             else:
                 pnl = (entry - ltp) * qty
                 pnl_pct = ((entry - ltp) / entry * 100) if entry else 0.0
-            est_charges = round_trip_charges(entry, ltp, qty)
+            is_opt = ("CE" in sym or "PE" in sym or "OPT" in sym)
+            if is_opt:
+                from trading.costs import options_round_trip
+                est_charges = options_round_trip(entry, ltp, qty)
+            else:
+                est_charges = round_trip_charges(entry, ltp, qty)
             t["unrealized_pnl"] = round(pnl, 2)
             t["pnl_pct"] = round(pnl_pct, 2)
             t["est_charges"] = round(est_charges, 2)
@@ -1039,10 +1156,17 @@ __TOPBAR__
     </div>
     <div id="tradeForm" style="display:none;padding:12px;background:var(--card);border-bottom:1px solid var(--line);font-size:12px">
       <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
-        <label><b>Symbol:</b> <input type="text" id="tSym" value="RELIANCE" style="width:100px;padding:5px 8px;border-radius:6px;border:1px solid var(--line);background:var(--cell);color:var(--ink);font-weight:600;text-transform:uppercase"></label>
+        <label><b>Symbol:</b> <input type="text" id="tSym" value="RELIANCE" placeholder="e.g. NIFTY, BANKNIFTY, RELIANCE" style="width:115px;padding:5px 8px;border-radius:6px;border:1px solid var(--line);background:var(--cell);color:var(--ink);font-weight:600;text-transform:uppercase"></label>
+        <label><b>Type:</b>
+          <select id="tInst" style="padding:5px 8px;border-radius:6px;border:1px solid var(--line);background:var(--cell);color:var(--ink);font-weight:600">
+            <option value="MIS">Equity (MIS)</option>
+            <option value="CE">Call Option (CE)</option>
+            <option value="PE">Put Option (PE)</option>
+          </select>
+        </label>
         <label><b>Side:</b> <select id="tSide" style="padding:5px 8px;border-radius:6px;border:1px solid var(--line);background:var(--cell);color:var(--ink)"><option value="BUY">BUY (Long)</option><option value="SELL">SELL (Short)</option></select></label>
         <label><b>Qty:</b> <input type="number" id="tQty" value="10" min="1" style="width:65px;padding:5px 8px;border-radius:6px;border:1px solid var(--line);background:var(--cell);color:var(--ink)"></label>
-        <label><b>Price (INR):</b> <input type="number" id="tPx" placeholder="Market (LTP)" step="0.05" style="width:110px;padding:5px 8px;border-radius:6px;border:1px solid var(--line);background:var(--cell);color:var(--ink)"></label>
+        <label><b>Price (INR):</b> <input type="number" id="tPx" placeholder="Market (LTP)" step="0.05" style="width:105px;padding:5px 8px;border-radius:6px;border:1px solid var(--line);background:var(--cell);color:var(--ink)"></label>
         <button class="btn go" id="btnSubmitTrade" style="padding:5px 14px">Execute Order</button>
         <button class="btn" id="btnCancelTrade" style="padding:5px 10px">Cancel</button>
         <span id="tradeMsg" style="font-size:12px;font-weight:600"></span>
@@ -1113,13 +1237,10 @@ function renderNifty(st){
   const s = st ? st.scan : null;
   if(!s) return;
   const ix = s.index_options || null;
-  if(!ix && !s.chain && !s.pivots) return;
-  if(!ix){
-    const only = contextPanel(s.chain, s.pivots, v => fmt(v));
-    if(only) wrap.append(only);
-    return;
-  }
-  wrap.append(niftyPanel(ix, v => fmt(v)));
+  const bix = s.banknifty_options || null;
+  if(!ix && !bix && !s.chain && !s.pivots) return;
+  if(ix) wrap.append(niftyPanel(ix, v => fmt(v)));
+  if(bix) wrap.append(niftyPanel(bix, v => fmt(v)));
   const ctx = contextPanel(s.chain, s.pivots, v => fmt(v));
   if(ctx) wrap.append(ctx);
 }
@@ -1972,13 +2093,22 @@ if (btnSubmitTrade) {
     tradeMsg.textContent = "Executing order…";
     try {
       const sym = (document.getElementById("tSym").value || "").trim().toUpperCase();
+      const inst = document.getElementById("tInst") ? document.getElementById("tInst").value : "MIS";
       const side = document.getElementById("tSide").value;
       const qty = parseInt(document.getElementById("tQty").value, 10) || 1;
       const px = parseFloat(document.getElementById("tPx").value) || 0;
+      const payload = {
+        symbol: sym,
+        side: side,
+        qty: qty,
+        price: px,
+        instrument_type: inst === "MIS" ? "equity" : "option",
+        option_type: inst !== "MIS" ? inst : null
+      };
       const res = await fetch("/api/trade", {
         method: "POST",
         headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({symbol: sym, side: side, qty: qty, price: px})
+        body: JSON.stringify(payload)
       });
       const j = await res.json();
       if (j.ok) {
