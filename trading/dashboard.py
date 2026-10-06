@@ -411,8 +411,19 @@ def get_data(date: str | None) -> dict:
     if not date:
         date = today
 
-    trades = [dict(r) for r in conn.execute(
-        "SELECT * FROM trades WHERE date = ? ORDER BY ts", (date,)).fetchall()] if date else []
+    # Active open positions must ALWAYS show all currently open trades regardless of what day they were entered.
+    # Completed trade history is filtered by the selected session date.
+    open_trades_all = [dict(r) for r in conn.execute(
+        "SELECT * FROM trades WHERE status = 'open' ORDER BY ts").fetchall()]
+    closed_trades_date = [dict(r) for r in conn.execute(
+        "SELECT * FROM trades WHERE status = 'closed' AND date = ? ORDER BY ts", (date,)).fetchall()] if date else []
+    
+    seen_ids = set()
+    trades = []
+    for t in open_trades_all + closed_trades_date:
+        if t["id"] not in seen_ids:
+            seen_ids.add(t["id"])
+            trades.append(t)
 
     rejections = [dict(r) for r in conn.execute(
         "SELECT * FROM rejections ORDER BY ts DESC LIMIT 50").fetchall()]
@@ -1855,8 +1866,42 @@ function renderCands(d){
     const gatePassed = c.gate_passed === 1 || c.gate_passed === true;
     row.append(el("td",null,gatePassed?"✓ PASS":"✗ FAIL"));
     row.append(el("td",null,verdictBadge(c.council_action ? c.council_action.toLowerCase() : null)));
-    row.append(el("td","num",c.council_conviction!=null?c.council_conviction+"/10":"—"));
-    row.append(el("td","small",c.executed ? "✓ Executed" : (c.rejection_reason || "HOLD / Rejected")));
+    const execTd = el("td","small");
+    if(c.executed){
+      execTd.innerHTML = `<span class="badge sm bull" style="padding:2px 6px">✓ Executed</span>`;
+    } else {
+      const btnWrap = el("div");
+      btnWrap.style.cssText = "display:flex;align-items:center;gap:6px";
+      const takeBtn = el("button","btn sm go","Take Trade");
+      takeBtn.style.padding = "2px 8px";
+      takeBtn.style.fontSize = "10.5px";
+      takeBtn.onclick = async ()=>{
+        takeBtn.disabled = true;
+        takeBtn.textContent = "Placing…";
+        try{
+          const res = await fetch("/api/trade", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({
+              symbol: c.symbol,
+              side: c.side || "BUY",
+              price: c.price,
+              stop_loss: c.stop_loss,
+              target: c.target,
+              strategy_id: "candidate_execution"
+            })
+          });
+          const j = await res.json();
+          if(j.ok){ load(); } else { alert(j.reason || "Trade rejected"); takeBtn.disabled=false; takeBtn.textContent="Take Trade"; }
+        }catch(e){ alert("Error: "+e); takeBtn.disabled=false; takeBtn.textContent="Take Trade"; }
+      };
+      btnWrap.append(takeBtn);
+      const rejSpan = el("span","muted", c.rejection_reason || "HOLD");
+      rejSpan.style.fontSize = "10px";
+      btnWrap.append(rejSpan);
+      execTd.append(btnWrap);
+    }
+    row.append(execTd);
     const pnlTd=el("td","num");
     if(c.shadow_pnl!=null){
       const p = c.shadow_pnl;
