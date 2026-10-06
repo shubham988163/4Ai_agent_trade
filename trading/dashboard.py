@@ -1331,11 +1331,6 @@ __TOPBAR__
   </section>
 
   <section class="panel">
-    <h2>LLM audit log <span class="sub">last 50 calls</span></h2>
-    <div class="scroll"><table id="alog"></table></div>
-  </section>
-
-  <section class="panel">
     <h2>EOD journal <span class="sub">written by the journal agent</span></h2>
     <div class="body"><pre class="report" id="report"></pre></div>
   </section>
@@ -1935,7 +1930,9 @@ function renderCands(d){
 }
 
 function renderAlog(d){
-  const t=document.getElementById("alog"); t.replaceChildren();
+  const t=document.getElementById("alog");
+  if(!t) return;
+  t.replaceChildren();
   if(!d.agent_log.length){t.append(el("caption","empty","No LLM calls logged yet."));return;}
   const head=el("tr");
   ["time","agent","model","status","response / error"].forEach(h=>head.append(el("th",null,h)));
