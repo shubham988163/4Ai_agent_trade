@@ -302,13 +302,16 @@ def to_frame(candles: list[dict]) -> pd.DataFrame | None:
     idx = pd.DatetimeIndex(
         [pd.Timestamp(int(c["timestamp"]), unit="s", tz="UTC") for c in rows]
     ).tz_convert(IST)
-    return pd.DataFrame({
+    df = pd.DataFrame({
         "Open": [float(c["open"]) for c in rows],
         "High": [float(c["high"]) for c in rows],
         "Low": [float(c["low"]) for c in rows],
         "Close": [float(c["close"]) for c in rows],
         "Volume": [float(c.get("volume") or 0) for c in rows],
     }, index=idx).sort_index()
+    if df.index.has_duplicates:
+        df = df[~df.index.duplicated(keep="last")]
+    return df
 
 
 class FyersFeed(LiveFeed):

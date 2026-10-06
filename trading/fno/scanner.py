@@ -196,17 +196,36 @@ class Scanner:
     def _spark(df, day, limit: int = 75) -> list[dict]:
         """Today's closed bars with running VWAP, EMA9, EMA21, OHLC, and Volume for candlestick chart."""
         import pandas as pd
+        if df is not None and not df.empty and df.index.has_duplicates:
+            df = df[~df.index.duplicated(keep="last")]
         day_df = ind.session_of(df, day)
         if day_df.empty:
             return []
+        if day_df.index.has_duplicates:
+            day_df = day_df[~day_df.index.duplicated(keep="last")]
+
         vw = ind.vwap(day_df)
         e9 = ind.ema(df["Close"], 9)
         e21 = ind.ema(df["Close"], 21)
+
+        def _safe_val(series, key, default=None):
+            if series is None or key not in series.index:
+                return default
+            val = series.loc[key]
+            if isinstance(val, (pd.Series, pd.DataFrame)):
+                val = val.iloc[-1]
+            if pd.notna(val):
+                try:
+                    return round(float(val), 2)
+                except (ValueError, TypeError):
+                    return default
+            return default
+
         rows = []
         for ts, bar in day_df.tail(limit).iterrows():
-            e9_val = round(float(e9.loc[ts]), 2) if ts in e9.index and pd.notna(e9.loc[ts]) else None
-            e21_val = round(float(e21.loc[ts]), 2) if ts in e21.index and pd.notna(e21.loc[ts]) else None
-            w_val = round(float(vw.loc[ts]), 2) if ts in vw.index and pd.notna(vw.loc[ts]) else round(float(bar["Close"]), 2)
+            e9_val = _safe_val(e9, ts)
+            e21_val = _safe_val(e21, ts)
+            w_val = _safe_val(vw, ts, round(float(bar["Close"]), 2))
             rows.append({
                 "t": ts.strftime("%H:%M"),
                 "o": round(float(bar["Open"]), 2),
