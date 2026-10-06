@@ -40,7 +40,13 @@ def apply(cand: Candidate, mkt: MarketContext,
         veto("structure", "failed breakout — price closed back below the level")
 
     if not cand.oi.bullish:
-        veto("oi", f"futures OI says {cand.oi.classification} — {cand.oi.detail}")
+        # Relaxed mode files an OI-flat read as a soft blocker: the name keeps
+        # its rejection, so it can never report BUY, but it lands on WATCH
+        # rather than AVOID. Every other non-bullish read stays a hard veto.
+        soft = (C.RELAXED and C.RELAXED_ALLOW_OI_FLAT
+                and cand.oi.classification == "OI FLAT")
+        veto("oi_flat" if soft else "oi",
+             f"futures OI says {cand.oi.classification} — {cand.oi.detail}")
 
     if mkt.classification == "STRONGLY BEARISH":
         veto("market", "broader market is strongly bearish — no long")

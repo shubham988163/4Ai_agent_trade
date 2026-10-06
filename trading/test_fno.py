@@ -382,6 +382,61 @@ def test_filters():
               for r in rejected(rows=TODAY_FAILED)))
 
 
+def test_relaxed_grading():
+    print("relaxed grading")
+    check("relaxed grading is off by default", not C.RELAXED)
+    try:
+        # Strict (the default): a flat OI read is treated as a contradiction.
+        strict, p = _candidate(oi_pct=0.2)
+        scoring.score_candidate(strict, _market())
+        filters.apply(strict, _market(), p)
+        check("strict: OI flat is filed as a hard blocker", "oi" in strict.blockers,
+              str(strict.blockers))
+        check("strict: OI flat reads AVOID", strict.verdict == "AVOID",
+              f"{strict.verdict} score={strict.score}")
+
+        C.set_relaxed(True)
+        check("relaxed leaves the score floor at 70",
+              C.MIN_TRADEABLE_SCORE == 70, str(C.MIN_TRADEABLE_SCORE))
+
+        soft, p2 = _candidate(oi_pct=0.2)
+        scoring.score_candidate(soft, _market())
+        filters.apply(soft, _market(), p2)
+        check("relaxed: OI flat is filed as a soft blocker",
+              soft.blockers == ["oi_flat"], str(soft.blockers))
+        check("relaxed: the rejection is kept, so the name is never tradeable",
+              not soft.tradeable and any("OI FLAT" in r for r in soft.rejections),
+              str(soft.rejections))
+        check("relaxed: OI flat surfaces as WATCH instead of AVOID",
+              soft.verdict == "WATCH", f"{soft.verdict} score={soft.score}")
+
+        # Relaxation only ever downgrades, so it must not touch what can be BUY.
+        good, p3 = _candidate()
+        scoring.score_candidate(good, _market())
+        filters.apply(good, _market(), p3)
+        check("relaxed: a clean setup is still tradeable",
+              good.tradeable and good.verdict == "BUY",
+              f"{good.verdict} {good.rejections}")
+
+        # And it is not a laundering pass: a read that argues against the long,
+        # or a missing one, stays hard in either mode.
+        bad, p4 = _candidate(pct=-1.2, oi_pct=4.0)
+        scoring.score_candidate(bad, _market())
+        filters.apply(bad, _market(), p4)
+        check("relaxed: short buildup is still a hard blocker",
+              "oi" in bad.blockers and bad.verdict == "AVOID",
+              f"{bad.blockers} {bad.verdict}")
+
+        gone, p5 = _candidate(oi_pct=None)
+        scoring.score_candidate(gone, _market())
+        filters.apply(gone, _market(), p5)
+        check("relaxed: unavailable OI is still a hard blocker",
+              "oi" in gone.blockers, str(gone.blockers))
+    finally:
+        C.set_relaxed(False)
+    check("relaxed is switched back off", not C.RELAXED)
+
+
 # --- windows ---------------------------------------------------------------
 
 def test_windows():
@@ -772,7 +827,8 @@ def test_web():
 
 def main() -> int:
     for fn in (test_indicators, test_oi, test_structure, test_trade_levels,
-               test_market_context, test_scoring, test_filters, test_windows,
+               test_market_context, test_scoring, test_filters,
+               test_relaxed_grading, test_windows,
                test_feed_parsing, test_zero_volume_feeds, test_verdicts,
                test_end_to_end, test_data_integrity, test_skip_reporting,
                test_derived_pct_reaches_the_display,

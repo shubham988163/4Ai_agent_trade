@@ -244,6 +244,12 @@ def as_dict(res: ScanResult) -> dict:
         "data_ok": res.data_ok,
         "stale_banner": None if res.data_ok else
         "REAL-TIME DATA UNAVAILABLE — SCAN NOT RELIABLE.",
+        # Surfaced separately from data_notes because a loosened bar has to be
+        # impossible to miss: reading a relaxed board as a strict one is exactly
+        # the mistake this flag exists to prevent.
+        "relaxed_banner": None if not C.RELAXED else
+        ("RELAXED GRADING — OI-flat setups shown as WATCH instead of rejected. "
+         "The score floor is unchanged and nothing relaxed is a BUY."),
         "data_notes": res.data_notes,
         "considered": res.considered,
         "market": {

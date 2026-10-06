@@ -63,6 +63,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--fyers-base", default="http://localhost:3001",
                    help="where that server listens (default http://localhost:3001)")
     p.add_argument("--json", action="store_true", help="machine-readable output")
+    p.add_argument("--relaxed", action="store_true",
+                   help="opt-in looser grading: an OI-flat read is shown as "
+                        "WATCH instead of rejected, so a quiet tape shows the "
+                        "near-misses instead of an empty board. The score floor "
+                        "is unchanged and nothing relaxed is a BUY.")
     return p
 
 
@@ -106,6 +111,8 @@ def scan_once(args) -> int:
 
 def main() -> int:
     args = build_parser().parse_args()
+    if args.relaxed:
+        C.set_relaxed(True)
     if not args.watch:
         return scan_once(args)
 

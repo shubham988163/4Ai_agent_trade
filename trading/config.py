@@ -11,7 +11,8 @@ load_dotenv(PROJECT_ROOT / ".env")
 
 
 # --- Trading universe ---
-# Core watchlist (used by the pre-market agent's prompt focus).
+# Core watchlist. This is both what the strategy engine scans and what the
+# pre-market agent is shown, so it is the only set of names the agent can block.
 WATCHLIST = ["RELIANCE", "HDFCBANK", "ICICIBANK", "INFY", "TCS", "SBIN"]
 
 # Full scan universe for the strategy engine — Nifty 50 constituents.
@@ -144,6 +145,22 @@ FALLBACK_DAY_CONFIG = {
     "blocked_symbols": [],
     "rationale": "fallback: pre-market agent unavailable — trading at half size",
 }
+
+# Feeds that would tell the agent whether today carries event risk (an earnings
+# print, an expiry, a macro release). Neither is wired up yet.
+RISK_CRITICAL_FEEDS = ("events_calendar", "news_headlines")
+
+# While any of those feeds is dark, the agent cannot know what it doesn't know,
+# so the risk multiplier is capped here rather than trusting the model to
+# self-report. On 2026-10-06 it read "unavailable" as "no specific earnings or
+# events reported" and justified full 1.0x size on that basis — five days
+# earlier, on the same darkness, it had halved risk instead. The cap is not a
+# judgement on the model's reasoning; it is that the spread between those two
+# readings is 2x position size, and only one of them is safe.
+#
+# This only ever REDUCES risk — it can never promote. 1.0x becomes reachable
+# again when the feeds behind RISK_CRITICAL_FEEDS actually exist.
+DARK_FEED_RISK_CAP = 0.75
 
 # --- Options Trading Settings ---
 INDEX_LOT_SIZES: dict[str, int] = {

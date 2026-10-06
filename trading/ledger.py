@@ -13,6 +13,7 @@ import sqlite3
 import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from pathlib import Path
 
 from trading.config import DB_PATH
@@ -91,8 +92,16 @@ CREATE TABLE IF NOT EXISTS candidate_signals (
 
 
 
+# IST, to match execution_router.load_day_config() and the pre-market agent.
+# Every "today"-keyed row — trades, rejections, the day's realized P&L — has to
+# agree on when today started. On a machine already set to IST this is a no-op;
+# anywhere else it is the difference between the router's day and the ledger's
+# day being the same day.
+IST = ZoneInfo("Asia/Kolkata")
+
+
 def _today() -> str:
-    return datetime.now().strftime("%Y-%m-%d")
+    return datetime.now(IST).strftime("%Y-%m-%d")
 
 
 class Ledger:

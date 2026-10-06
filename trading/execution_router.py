@@ -63,6 +63,7 @@ def load_day_config() -> dict:
         cfg_date = str(cfg.get("date", ""))
         if cfg_date != today:
             stale = dict(FALLBACK_DAY_CONFIG)
+            stale["source"] = "fallback"
             stale["rationale"] = (f"fallback: today_config.json is for {cfg_date or 'an unknown date'}, "
                                   f"not {today} — pre-market agent did not run today")
             return stale
@@ -71,7 +72,9 @@ def load_day_config() -> dict:
         cfg.setdefault("regime", "choppy")
         return cfg
     except (OSError, ValueError, TypeError):
-        return dict(FALLBACK_DAY_CONFIG)
+        missing = dict(FALLBACK_DAY_CONFIG)
+        missing["source"] = "fallback"
+        return missing
 
 
 class ExecutionRouter:
@@ -161,8 +164,14 @@ class ExecutionRouter:
         if day_pnl >= DAILY_PROFIT_TARGET:
             return "daily_profit_target_hit (locking in gains for the day)"
 
-        today = datetime.now(IST).strftime("%Y-%m-%d")
-        open_positions = [t for t in self.ledger.open_trades() if t.get("date") == today]
+        # open_trades() already filters to status='open', so every row here is
+        # live capital and live risk. This used to narrow further to
+        # date == today, which meant a position that survived the 15:15
+        # square-off — or a stale open row — stopped counting against the cap,
+        # silently turning a 5-position limit into 10. The per-symbol value
+        # check below has always summed across all dates; the count matches it
+        # now.
+        open_positions = self.ledger.open_trades()
         if (len(open_positions) >= MAX_OPEN_POSITIONS
                 and signal["symbol"] not in {t["symbol"] for t in open_positions}):
             return f"max_open_positions ({len(open_positions)}/{MAX_OPEN_POSITIONS})"

@@ -371,6 +371,14 @@ def _handle_premarket_run() -> dict:
     try:
         from trading.agents.premarket import run as run_premarket
         cfg = run_premarket()
+        # A fallback config IS written to disk (so the day is never left without
+        # one), but it is not a verdict. Reporting ok=True here would tell the
+        # user the agent ran when it never answered.
+        if cfg.get("source") != "agent":
+            return {"ok": False, "config": cfg,
+                    "error": ("The agent returned no verdict — the fallback "
+                              "config (half size) is in force. Check the API key "
+                              "and the agent_log table.")}
         return {"ok": True, "config": cfg}
     except Exception as e:
         return {"ok": False, "error": str(e)}
@@ -583,10 +591,18 @@ def get_data(date: str | None) -> dict:
                                 .fromtimestamp(r["ts"]).strftime("%Y-%m-%d") == date),
     }
 
+    # Render the config the router is actually trading on, not the raw file. A
+    # file dated before today is rejected by load_day_config() in favour of
+    # FALLBACK_DAY_CONFIG, so reading the JSON directly here advertised a
+    # regime today's orders were not using.
     try:
-        day_config = json.load(open(TODAY_CONFIG_PATH))
-    except (OSError, ValueError):
-        day_config = None
+        from trading.execution_router import load_day_config
+        day_config = load_day_config()
+    except Exception:                                     # noqa: BLE001
+        try:
+            day_config = json.load(open(TODAY_CONFIG_PATH))
+        except (OSError, ValueError):
+            day_config = None
 
     report = None
     if date:
@@ -1599,6 +1615,9 @@ function renderCfg(d){
   const add=(k,v)=>{const s=el("span"); const b=el("b",null,k+": "); s.append(b,String(v)); c.append(s);};
   add("date",cfg.date||"—"); add("regime",cfg.regime);
   add("risk multiplier",cfg.risk_multiplier);
+  // "fallback" means no verdict was produced today and the safe defaults are
+  // in force — without this the panel looks identical to a real agent run.
+  add("source",cfg.source||"unknown");
   add("blocked",(cfg.blocked_symbols&&cfg.blocked_symbols.length)?cfg.blocked_symbols.join(", "):"none");
   const r=el("span","muted"); r.textContent="“"+(cfg.rationale||"")+"”"; c.append(r);
 }
@@ -2559,12 +2578,24 @@ def main(argv: list[str] | None = None):
     from trading import retention
 
     ap = argparse.ArgumentParser(prog="python -m trading.dashboard")
-    ap.add_argument("port", nargs="?", type=int, default=8080)
+    # 8787 is what the README, scripts/autostart.vbs and start_trading.bat all
+    # expect; the old 8080 default meant `python -m trading.dashboard` opened a
+    # port the launcher never linked to.
+    ap.add_argument("port", nargs="?", type=int, default=8787)
     ap.add_argument("--keep-days", type=int, default=RETENTION_DAYS,
                     help=f"trading sessions of history to keep (default {RETENTION_DAYS})")
     ap.add_argument("--no-prune", action="store_true",
                     help="leave the ledger alone — keep every session on disk")
+    ap.add_argument("--relaxed", action="store_true",
+                    help="opt-in looser scanner grading: an OI-flat read is shown "
+                         "as WATCH instead of rejected, so a quiet tape shows the "
+                         "near-misses instead of an empty board. The score floor "
+                         "is unchanged and nothing relaxed is a BUY.")
     args = ap.parse_args(argv)
+
+    if args.relaxed:
+        from trading.fno import config as fno_config
+        fno_config.set_relaxed(True)
 
     if args.no_prune:
         print("retention: pruning disabled for this run (--no-prune)")

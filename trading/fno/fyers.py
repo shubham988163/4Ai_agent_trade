@@ -124,10 +124,19 @@ class FyersClient:
         self._fyers_instance = None
 
     def _get_direct_model(self):
+        """The SDK client, or None when there is no token or no SDK.
+
+        The import is guarded because fyers_apiv3 is an optional dependency: a
+        missing package must degrade the feed to delayed data, not crash the
+        scan inside FyersFeed.__init__.
+        """
         token, _ = load_token()
         if not token:
             return None
-        from fyers_apiv3 import fyersModel
+        try:
+            from fyers_apiv3 import fyersModel
+        except ImportError:
+            return None
         return fyersModel.FyersModel(
             client_id=FYERS_APP_ID,
             token=token,
@@ -167,17 +176,27 @@ class FyersClient:
             except Exception as exc:
                 return False, f"cannot reach the Fyers server at {self.base} ({exc})"
 
-        # 1. Check direct token first
+        # 1. Check direct token first. A token file on disk is not proof the
+        #    session works, so the profile call has to come back clean before
+        #    this reports live — claiming live on an unverified token hides a
+        #    dead feed behind a green pill.
         token, prof = load_token()
         if token:
             model = self._get_direct_model()
-            if model:
-                try:
-                    p = model.get_profile()
-                    if isinstance(p, dict) and p.get("code") in (-8, -99, -17):
-                        return False, "Fyers token expired — please re-authenticate"
-                except Exception:
-                    pass
+            if model is None:
+                return False, ("Fyers token present but fyers_apiv3 is not "
+                               "installed — run: pip install fyers-apiv3")
+            try:
+                p = model.get_profile()
+            except Exception as exc:                    # noqa: BLE001
+                return False, (f"Fyers token could not be verified ({exc}) — "
+                               "re-authenticate")
+            if isinstance(p, dict) and (p.get("s") == "error"
+                                        or p.get("code") in (-8, -99, -17)):
+                if p.get("code") in (-8, -99, -17):
+                    return False, "Fyers token expired — please re-authenticate"
+                return False, (f"Fyers rejected the token: "
+                               f"{p.get('message') or p.get('code')} — re-authenticate")
             name = (prof or {}).get("name") or "User"
             return True, f"Fyers live ({name})"
 
@@ -211,7 +230,13 @@ class FyersClient:
                 "range_to": range_to,
                 "cont_flag": "1",
             }
-            res = model.history(data=req)
+            try:
+                res = model.history(data=req)
+            except Exception as exc:                    # noqa: BLE001
+                # Transport failure is per-symbol, not fatal: raise FyersError
+                # so FyersFeed records it and falls back to yfinance for this
+                # name instead of the exception escaping the whole scan.
+                raise FyersError(f"Fyers history request failed ({exc})") from exc
             if isinstance(res, dict) and res.get("s") == "ok":
                 candles = res.get("candles") or []
                 # Fyers candles format: [timestamp, open, high, low, close, volume]

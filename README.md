@@ -121,7 +121,15 @@ export TELEGRAM_CHAT_ID=...
 | `trading/retention.py` | 5-session data retention — prunes the ledger, reports and candle cache |
 | `tradingview/*.pine` | Pine v6 strategies (EMA 9/21 and AVWAP scalp) that alert into the webhook |
 
-## Daily schedule (cron, IST)
+## Daily schedule (IST)
+
+The pre-market agent must run **before the 09:15 open**. It exits `0` only when
+it got a real verdict from the model; if the call fails it still writes the safe
+fallback so the day is never left without parameters, but it exits `1` — so a
+scheduler's "last result" tells you whether the agent actually spoke. Check
+`source` in `data/today_config.json`: `"agent"` or `"fallback"`.
+
+macOS — `./scripts/install_schedule.sh` (launchd, catches up after wake):
 
 ```cron
 # Pre-market analyst — writes data/today_config.json
@@ -130,6 +138,18 @@ export TELEGRAM_CHAT_ID=...
 # EOD journal — writes reports/YYYY-MM-DD.md
 0 16 * * 1-5  cd $HOME/myselfproject/ai-tradeagent && .venv/bin/python -m trading.agents.eod_journal >> logs/eod.log 2>&1
 ```
+
+Windows — run once, from the project root:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\install_schedule.ps1
+powershell -ExecutionPolicy Bypass -File scripts\install_schedule.ps1 -Status
+```
+
+That registers `RanchoTrade-Premarket` at 08:45 Mon–Fri with *start when
+available* (the Windows equivalent of launchd's catch-up). The trigger time is
+local, so the machine must be set to IST. The same agent can be run by hand at
+any time from the dashboard's **Run Now** button.
 
 ## Wiring in your own strategy
 
@@ -229,9 +249,19 @@ support: it holds no broker connection and places no orders.
 .venv/bin/python -m trading.fno --symbols VEDL,SBIN --notify --allow-delayed
 .venv/bin/python -m trading.fno --replay data/fno/sample-2026-08-20.json
 .venv/bin/python -m trading.fno --allow-delayed --json   # machine-readable
+.venv/bin/python -m trading.fno --relaxed --allow-delayed  # show near-misses too
 .venv/bin/python -m trading.dashboard                    # web UI at :8787/fno
-.venv/bin/python -m trading.test_fno                     # 155 correctness checks
+.venv/bin/python -m trading.test_fno                     # the scanner's checks
 ```
+
+`--relaxed` is an opt-in widening of what is *displayed*, not a strategy change.
+On a quiet tape nearly every name is vetoed on flat open interest, so the board
+reads empty; with it on, an OI-flat read is filed as a soft blocker and the name
+shows as **WATCH** instead of AVOID. It can only ever downgrade — a relaxed name
+keeps its rejection, and `tradeable` requires an empty rejection list, so nothing
+relaxed can report **BUY**. The score floor and every other gate are unchanged,
+and the page carries a `RELAXED GRADING` banner so a loosened board can never be
+mistaken for a strict one.
 
 ### What it does per scan
 

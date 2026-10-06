@@ -225,6 +225,11 @@ class Scanner:
     def run(self) -> ScanResult:
         win = window_for(self.now)
         notes: list[str] = [f"{win.label}: {win.note}"]
+        if C.RELAXED:
+            notes.append(
+                "RELAXED GRADING — an OI-flat read is shown as WATCH instead of "
+                "rejected. Nothing relaxed can be a BUY; the score floor and "
+                "every other gate are unchanged.")
 
         universe = self.feed.universe()
         board = self.feed.futures_board()

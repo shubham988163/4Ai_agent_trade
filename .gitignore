@@ -24,3 +24,7 @@ data/fno/*
 # macOS
 .DS_Store
 
+# Claude Code local settings — personal permissions, and a convenient place to
+# put an API key by mistake. Never commit this file.
+.claude/settings.local.json
+

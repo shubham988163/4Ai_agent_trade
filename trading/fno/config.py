@@ -75,6 +75,35 @@ GRADES = [(90, "A+"), (80, "A"), (70, "B"), (60, "Weak")]
 MIN_TRADEABLE_SCORE = 70         # below this the scanner will not emit a trade
 ALERT_SCORE = 80                 # A/A+ setups fire the 🚨 alert block
 
+# --- relaxed (opt-in) grading, for seeing the near-misses ------------------
+# Strict stays the default: the spec and the README are explicit that an empty
+# board is the correct output most mornings, and these gates are what make it
+# so. `--relaxed` stops treating an OI-flat reading as a contradiction, so a
+# quiet tape — where nearly every name is vetoed on flat OI — shows what came
+# closest instead of nothing.
+#
+# It can only ever downgrade, never promote. A relaxed name keeps its rejection
+# text and `tradeable` requires an empty rejection list, so nothing relaxed can
+# report BUY. The score floor is deliberately NOT lowered: `"score"` is already
+# a soft blocker, so strict mode already surfaces 60–69 as WATCH, and moving the
+# floor to 55 would have let a 55–69 name through with no rejection at all —
+# i.e. a real BUY, not a wider display. A read that actively argues against the
+# long (short buildup, long unwinding, unavailable) stays vetoed outright.
+RELAXED_ALLOW_OI_FLAT = True
+RELAXED = False                  # flip via set_relaxed(); do not assign directly
+
+
+def set_relaxed(on: bool = True) -> None:
+    """Turn relaxed grading on or off.
+
+    Every module reads the flag as `C.RELAXED` at call time, so setting the
+    module attribute is enough — nothing needs threading through Scanner,
+    ScanCache or the web layer.
+    """
+    global RELAXED
+    RELAXED = bool(on)
+
+
 EMA_FAST = 20
 EMA_SLOW = 50
 

@@ -760,6 +760,8 @@ function render(){
   if(s.stale_banner) banner(s.stale_banner,
     "No setup is graded and no entry, stop or target is produced.");
   else if(STATE.error) banner("Last refresh failed — showing the previous scan", STATE.error);
+  if(s.relaxed_banner) banner(s.relaxed_banner,
+    "Opt-in via --relaxed. Relaxed names keep their rejection and the score floor is unchanged, so none of them is a BUY.");
 
   kpis(s); nifty(s); sectors(s); feeds(s); notes(s); counts(s); list(s); table(s); updateQuickChips(s);
   if(window.ScannerAlerts){
@@ -2633,7 +2635,14 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--live-only", action="store_true",
                     help="refuse to grade delayed candles (same rule as the CLI "
                          "without --allow-delayed)")
+    ap.add_argument("--relaxed", action="store_true",
+                    help="opt-in looser grading: an OI-flat read is shown as "
+                         "WATCH instead of rejected, so a quiet tape shows the "
+                         "near-misses instead of an empty board. The score floor "
+                         "is unchanged and nothing relaxed is a BUY.")
     args = ap.parse_args(argv)
+    if args.relaxed:
+        C.set_relaxed(True)
 
     fyers.start_background_server()
     server = _bind(args.port, Handler, "the scanner")

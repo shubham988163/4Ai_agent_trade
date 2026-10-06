@@ -187,7 +187,10 @@ class Candidate:
 
     # Blockers that describe a setup which has not matured yet, as opposed to
     # one the evidence argues against. Only these can leave a stock on watch.
-    SOFT_BLOCKERS = ("timing", "structure", "risk", "score", "window")
+    # "oi_flat" is how relaxed mode files an OI-flat read: no positional
+    # conviction either way, which is an absence of confirmation rather than a
+    # contradiction. "oi" (short buildup, long unwinding) stays hard either way.
+    SOFT_BLOCKERS = ("timing", "structure", "risk", "score", "window", "oi_flat")
 
     @property
     def verdict(self) -> str:
