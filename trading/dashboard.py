@@ -1321,16 +1321,6 @@ __TOPBAR__
   </section>
 
   <section class="panel">
-    <h2>Rejections <span class="sub">risk kernel &amp; rate limiter, last 50</span></h2>
-    <div class="scroll"><table id="rej"></table></div>
-  </section>
-
-  <section class="panel">
-    <h2>Candidate signals &amp; Shadow P&amp;L <span class="sub">council audit &amp; hypothetical shadow resolution, last 50</span></h2>
-    <div class="scroll"><table id="cands"></table></div>
-  </section>
-
-  <section class="panel">
     <h2>EOD journal <span class="sub">written by the journal agent</span></h2>
     <div class="body"><pre class="report" id="report"></pre></div>
   </section>
@@ -1835,7 +1825,9 @@ function renderTrades(d){
 }
 
 function renderRej(d){
-  const t=document.getElementById("rej"); t.replaceChildren();
+  const t=document.getElementById("rej");
+  if(!t) return;
+  t.replaceChildren();
   if(!d.rejections.length){t.append(el("caption","empty","No rejections logged."));return;}
   const head=el("tr");
   ["time","symbol","side","qty","reason"].forEach(h=>head.append(el("th",null,h)));
