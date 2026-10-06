@@ -116,6 +116,76 @@ def build_option_order_from_plan(
     }
 
 
+def _get_strike_step(symbol: str, spot: float) -> float:
+    clean = symbol.upper()
+    if "NIFTY" in clean and "BANK" not in clean:
+        return 50.0
+    if "BANKNIFTY" in clean:
+        return 100.0
+    if "FINNIFTY" in clean:
+        return 50.0
+    if spot > 3000:
+        return 100.0
+    if spot > 1500:
+        return 50.0
+    if spot > 500:
+        return 20.0
+    return 10.0
+
+
+def _build_synthetic_quotes(symbol: str, spot: float, now: datetime) -> list[OptionQuote]:
+    """Generate synthetic Black-Scholes option quotes when broker chain is offline or token expired."""
+    from trading.fno.models import Provenance
+    from trading.fno.pricing import call_price, put_price
+
+    step = _get_strike_step(symbol, spot)
+    atm = round(spot / step) * step
+    is_idx = is_index_symbol(symbol)
+    iv = 0.135 if is_idx else 0.28
+    years = 4.0 / 365.0  # near expiry (~4 days)
+    exp_str = now.strftime("%y%b").upper()
+    clean_sym = symbol.upper().replace("NSE:", "").replace("-EQ", "").replace("-INDEX", "").strip()
+
+    quotes: list[OptionQuote] = []
+    strikes = [atm - 2 * step, atm - step, atm, atm + step, atm + 2 * step]
+    for st in strikes:
+        st_val = round(st, 1 if step < 1 else 0)
+        st_int = int(st_val) if st_val == int(st_val) else st_val
+        # Call
+        c_px = max(0.5, round(call_price(spot, st, years, iv), 2))
+        c_id = f"NSE:{clean_sym}{exp_str}{st_int}CE"
+        quotes.append(OptionQuote(
+            underlying=symbol,
+            identifier=c_id,
+            option_type="Call",
+            strike=float(st),
+            expiry="near",
+            last_price=c_px,
+            pct_change=0.0,
+            open_interest=500000.0,
+            volume=100000.0,
+            underlying_value=spot,
+            prov=Provenance("synthetic", c_id, "black_scholes", now, now)
+        ))
+        # Put
+        p_px = max(0.5, round(put_price(spot, st, years, iv), 2))
+        p_id = f"NSE:{clean_sym}{exp_str}{st_int}PE"
+        quotes.append(OptionQuote(
+            underlying=symbol,
+            identifier=p_id,
+            option_type="Put",
+            strike=float(st),
+            expiry="near",
+            last_price=p_px,
+            pct_change=0.0,
+            open_interest=500000.0,
+            volume=100000.0,
+            underlying_value=spot,
+            prov=Provenance("synthetic", p_id, "black_scholes", now, now)
+        ))
+    return quotes
+
+
 def select_option_for_underlying(
     symbol: str,
     side: str,
@@ -130,51 +200,57 @@ def select_option_for_underlying(
     """
     fyers_sym = get_fyers_symbol(symbol)
     c = client or FyersClient()
-    chain_data = c.option_chain(fyers_sym, strikecount=8)
-    if not chain_data:
-        return None
+    chain_data = None
+    try:
+        chain_data = c.option_chain(fyers_sym, strikecount=8)
+    except Exception:
+        chain_data = None
 
-    chain = chain_data.get("optionsChain") or []
-    expiry_data = chain_data.get("expiryData") or []
-    front_expiry = expiry_data[0].get("date") if expiry_data else ""
     now = datetime.now(IST)
-
     quotes: list[OptionQuote] = []
-    spot_from_chain = None
-    for it in chain:
-        if it.get("strike_price") == -1:
-            spot_from_chain = float(it.get("ltp") or 0)
-            break
-    spot = spot_price or spot_from_chain or 1.0
+    spot = spot_price
 
-    for it in chain:
-        strike = it.get("strike_price")
-        opt_type = it.get("option_type")
-        if strike is None or strike == -1 or not opt_type:
-            continue
-        sym_id = it.get("symbol", "")
-        kind = "Call" if opt_type == "CE" else "Put"
-        ltp = float(it.get("ltp") or 0)
-        oi = float(it.get("oi") or 0)
-        vol = float(it.get("volume") or 0)
-        pchange = float(it.get("ltpchp") or 0)
-        from trading.fno.models import Provenance
-        quotes.append(OptionQuote(
-            underlying=symbol,
-            identifier=sym_id,
-            option_type=kind,
-            strike=float(strike),
-            expiry=front_expiry or "near",
-            last_price=ltp,
-            pct_change=pchange,
-            open_interest=oi,
-            volume=vol,
-            underlying_value=spot,
-            prov=Provenance("fyers", sym_id, "option_chain", now, now)
-        ))
+    if chain_data and chain_data.get("optionsChain"):
+        chain = chain_data.get("optionsChain") or []
+        expiry_data = chain_data.get("expiryData") or []
+        front_expiry = expiry_data[0].get("date") if expiry_data else ""
+
+        spot_from_chain = None
+        for it in chain:
+            if it.get("strike_price") == -1:
+                spot_from_chain = float(it.get("ltp") or 0)
+                break
+        spot = spot or spot_from_chain or 1.0
+
+        for it in chain:
+            strike = it.get("strike_price")
+            opt_type = it.get("option_type")
+            if strike is None or strike == -1 or not opt_type:
+                continue
+            sym_id = it.get("symbol", "")
+            kind = "Call" if opt_type == "CE" else "Put"
+            ltp = float(it.get("ltp") or 0)
+            oi = float(it.get("oi") or 0)
+            vol = float(it.get("volume") or 0)
+            pchange = float(it.get("ltpchp") or 0)
+            from trading.fno.models import Provenance
+            quotes.append(OptionQuote(
+                underlying=symbol,
+                identifier=sym_id,
+                option_type=kind,
+                strike=float(strike),
+                expiry=front_expiry or "near",
+                last_price=ltp,
+                pct_change=pchange,
+                open_interest=oi,
+                volume=vol,
+                underlying_value=spot,
+                prov=Provenance("fyers", sym_id, "option_chain", now, now)
+            ))
 
     if not quotes:
-        return None
+        spot = spot or 1000.0
+        quotes = _build_synthetic_quotes(symbol, spot, now)
 
     # Calculate default targets if not provided
     is_buy = side.upper() in ("BUY", "LONG", "CALL", "CE")

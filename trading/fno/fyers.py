@@ -170,6 +170,14 @@ class FyersClient:
         # 1. Check direct token first
         token, prof = load_token()
         if token:
+            model = self._get_direct_model()
+            if model:
+                try:
+                    p = model.get_profile()
+                    if isinstance(p, dict) and p.get("code") in (-8, -99, -17):
+                        return False, "Fyers token expired — please re-authenticate"
+                except Exception:
+                    pass
             name = (prof or {}).get("name") or "User"
             return True, f"Fyers live ({name})"
 
