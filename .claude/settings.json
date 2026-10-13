@@ -1,0 +1,22 @@
+{
+    "permissions": {
+        "allow": [
+            "Bash(python -m py_compile:*)",
+            "Bash(python -m pytest:*)",
+            "Bash(echo:*)",
+            "Bash(cd:*)",
+            "Bash(ls:*)",
+            "Bash(which:*)",
+            "Bash(pip list:*)",
+            "Bash(pip show:*)",
+            "Bash(.venv/Scripts/python.exe -m py_compile:*)",
+            "Bash(.venv/Scripts/python.exe -m pytest:*)",
+            "Bash(python -m trading.dashboard)",
+            "Bash(python -m trading.agents.agent_trader:*)",
+            "Read(//tmp/**)"
+        ],
+        "additionalDirectories": [
+            "C:\\tmp"
+        ]
+    }
+}

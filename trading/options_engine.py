@@ -27,6 +27,8 @@ from trading.config import (
     DEFAULT_STOCK_OPTION_LOT,
     MAX_OPTION_POSITION_VALUE,
     MAX_OPTION_RISK_PER_TRADE,
+    OPTION_STRIKE_TYPE,
+    OPTION_ITM_DEPTH,
 )
 from trading.costs import options_round_trip
 from trading.fno import options as opt_mod
@@ -111,6 +113,7 @@ def build_option_order_from_plan(
         "stop_loss": stop_premium,
         "target": target_premium,
         "is_option": True,
+        "moneyness": q.moneyness,
         "breakeven": plan.breakeven,
         "rr": plan.option_rr or round((target_premium - premium) / max(0.1, premium - stop_premium), 2),
     }
@@ -193,16 +196,22 @@ def select_option_for_underlying(
     stop_loss: float | None = None,
     target: float | None = None,
     client: FyersClient | None = None,
+    strike_type: str = OPTION_STRIKE_TYPE,
+    itm_depth: int = OPTION_ITM_DEPTH,
 ) -> dict | None:
     """Select the best option (Call for BUY, Put for SELL) for an underlying stock or index.
     
+    By default filters strictly for In-The-Money (ITM) options:
+      - Long/BUY -> Call (CE) with strike < spot (1 strike ITM)
+      - Short/SELL -> Put (PE) with strike > spot (1 strike ITM)
+
     Returns an option order dictionary ready for execution, or None.
     """
     fyers_sym = get_fyers_symbol(symbol)
     c = client or FyersClient()
     chain_data = None
     try:
-        chain_data = c.option_chain(fyers_sym, strikecount=8)
+        chain_data = c.option_chain(fyers_sym, strikecount=10)
     except Exception:
         chain_data = None
 
@@ -252,27 +261,49 @@ def select_option_for_underlying(
         spot = spot or 1000.0
         quotes = _build_synthetic_quotes(symbol, spot, now)
 
-    # Calculate default targets if not provided
     is_buy = side.upper() in ("BUY", "LONG", "CALL", "CE")
+    target_kind = "Call" if is_buy else "Put"
+    effective_strike_type = (strike_type or OPTION_STRIKE_TYPE).upper()
+    effective_depth = max(1, itm_depth or OPTION_ITM_DEPTH)
+
+    # Filter quotes by strike_type (e.g. ITM)
+    candidate_quotes = quotes
+    if effective_strike_type == "ITM":
+        # Call ITM: strike < spot; Put ITM: strike > spot
+        itm_quotes = [
+            q for q in quotes
+            if q.option_type == target_kind and q.last_price > 0 and (q.strike < spot if is_buy else q.strike > spot)
+        ]
+        if itm_quotes:
+            # Sort nearest to spot (least distance to spot among ITM)
+            itm_quotes.sort(key=lambda q: abs(q.strike - spot))
+            chosen_depth = min(effective_depth - 1, len(itm_quotes) - 1)
+            candidate_quotes = itm_quotes[chosen_depth:chosen_depth + 3]
+
     if is_buy:
         sl = stop_loss if stop_loss is not None else round(spot * 0.99, 2)
         risk = max(0.5, spot - sl)
         tg1 = target if target is not None else round(spot + 2 * risk, 2)
         tg2 = round(spot + 3 * risk, 2)
-        plan = opt_mod.plan_call(symbol, quotes, spot=spot, target1=tg1, target2=tg2, stop=sl, now=now, today=now.date())
+        plan = opt_mod.plan_call(symbol, candidate_quotes, spot=spot, target1=tg1, target2=tg2, stop=sl, now=now, today=now.date())
     else:
         sl = stop_loss if stop_loss is not None else round(spot * 1.01, 2)
         risk = max(0.5, sl - spot)
         tg1 = target if target is not None else round(spot - 2 * risk, 2)
         tg2 = round(spot - 3 * risk, 2)
-        plan = opt_mod.plan_put(symbol, quotes, spot=spot, target1=tg1, target2=tg2, stop=sl, now=now, today=now.date())
+        plan = opt_mod.plan_put(symbol, candidate_quotes, spot=spot, target1=tg1, target2=tg2, stop=sl, now=now, today=now.date())
 
-    # Fallback to ATM strike if strict plan checks filtered everything
+    # Fallback to chosen strike if strict plan checks filtered everything
     if not plan.quote:
-        target_kind = "Call" if is_buy else "Put"
         matching = [q for q in quotes if q.option_type == target_kind and q.last_price > 0]
-        if matching:
-            # Pick strike closest to spot
+        if effective_strike_type == "ITM":
+            itm_matching = [q for q in matching if (q.strike < spot if is_buy else q.strike > spot)]
+            if itm_matching:
+                itm_matching.sort(key=lambda q: abs(q.strike - spot))
+                chosen = itm_matching[min(effective_depth - 1, len(itm_matching) - 1)]
+                plan.quote = chosen
+                plan.breakeven = chosen.strike + chosen.last_price if is_buy else chosen.strike - chosen.last_price
+        elif matching:
             matching.sort(key=lambda q: abs(q.strike - spot))
             best = matching[0]
             plan.quote = best

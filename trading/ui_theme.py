@@ -243,6 +243,7 @@ def topbar(title: str, active: str, right: str = "", subtitle_id: str = "win") -
     </div>
     <nav class="nav">
       <a href="/"{cur("dashboard")}>Dashboard</a>
+      <a href="/target"{cur("target")} style="color:#10b981;font-weight:700">🎯 15K → 1L Target</a>
       <a href="/#agents-desk" style="border-left:1px solid var(--line);color:var(--accent);font-weight:700">🤖 4 Agents Desk</a>
       <a href="/fno"{cur("scanner")}>Scanner</a>
     </nav>

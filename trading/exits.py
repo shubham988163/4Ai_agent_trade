@@ -139,7 +139,11 @@ def breakeven_buffer(
             if net >= 0:
                 break
             buffer += (-net) / qty
-        return buffer
+        # Options have real market bid-ask spreads (0.20 - 0.70 pts) and tick size 0.05.
+        # Adding a cushion ensures that when the stop triggers, execution friction cannot
+        # cause the net realized P&L to exit in negative.
+        spread_cushion = max(0.25, round(entry * 0.003, 2))
+        return buffer + spread_cushion
 
     buffer = breakeven_move(entry, qty) + 2.0 * slip * entry
     for _ in range(4):
@@ -216,16 +220,17 @@ def update_exit(
             elif not buy and lowest is not None:
                 candidates.append(lowest + config.trail_atr_mult * atr)
         elif is_option:
-            # High-watermark profit lock for options without ATR series:
-            # when excursion expands >= 1.5R, lock in 50% of the gain above 1R.
+            # Dynamic high-watermark profit trail for options:
+            # As price moves beyond breakeven, continuously ratchet the stop upward,
+            # locking in 50% of all gains made above the breakeven buffer.
             if buy and highest is not None:
                 peak_gain = highest - entry
-                if peak_gain >= 1.5 * risk_per_share:
-                    candidates.append(entry + buffer + 0.5 * (peak_gain - risk_per_share))
+                if peak_gain > buffer:
+                    candidates.append(entry + buffer + 0.5 * (peak_gain - buffer))
             elif not buy and lowest is not None:
                 peak_gain = entry - lowest
-                if peak_gain >= 1.5 * risk_per_share:
-                    candidates.append(entry - buffer - 0.5 * (peak_gain - risk_per_share))
+                if peak_gain > buffer:
+                    candidates.append(entry - buffer - 0.5 * (peak_gain - buffer))
 
     new_stop = max(candidates) if buy else min(candidates)
 

@@ -96,8 +96,8 @@ MAX_COST_RISK_RATIO = 0.30      # Max friction as a fraction of risk (30%)
 # --- Exit management: deterministic trailing stop ---
 TRAIL_ENABLED = True             # Enabled: trailing stop moves to breakeven & trails to protect profit
 BREAKEVEN_AT_R = 1.0            # favourable excursion (in R) that moves the stop to breakeven
-OPTION_BREAKEVEN_AT_R = 0.4     # for options: arm breakeven at 0.4R (since option stops are wide)
-OPTION_BREAKEVEN_PCT = 0.08     # for options: arm breakeven at +8% gain
+OPTION_BREAKEVEN_AT_R = 0.5     # for options: arm breakeven at 0.5R gain
+OPTION_BREAKEVEN_PCT = 0.03     # for options: arm breakeven at +3% gain
 TRAIL_ATR_MULT = 2.0            # chandelier trail distance in ATR(14) units
 PARTIAL_AT_R = 1.5              # R multiple that triggers partial booking (None disables)
 PARTIAL_PCT = 0.5               # fraction of the position booked at the partial
@@ -123,7 +123,7 @@ AGENT_MAX_TRADES_PER_SCAN = 3   # Max new trades to execute in a single scan pas
 # agent reads the scanner's verdicts AND its plan (entry band, structural stop,
 # 1:2 / 1:3 targets) and runs them through the same council and risk kernel.
 # Opt-in and OFF by default, like TRAIL_ENABLED: nothing changes until flipped.
-AGENT_SCANNER_ENABLED = False
+AGENT_SCANNER_ENABLED = True
 # Deliberately NOT an "orb_ma200*" id, so ExecutionRouter.risk_check's 200MA
 # trend gate does not apply to it -- the same pattern ema_9_21 and avwap_scalp
 # already use. The agent re-applies that gate itself before routing; see
@@ -132,10 +132,11 @@ AGENT_SCANNER_ENABLED = False
 AGENT_SCANNER_STRATEGY_ID = "fno_scanner"
 AGENT_SCANNER_TIERS = ("BUY", "WATCH")   # ("BUY",) would be the BUY picks only
 AGENT_SCANNER_MAX = 3                    # names taken from one scan per pass
-# Enter only while price is inside the scanner's own entry band. A WATCH name
-# is usually sitting above its band already -- that is part of why it is only
-# on watch -- so this flag decides whether the agent chases them or skips them.
+# Enter only while price is inside the scanner's own entry band (plus chase tolerance).
 AGENT_SCANNER_REQUIRE_ENTRY_BAND = True
+AGENT_SCANNER_CHASE_TOLERANCE_PCT = 0.0075  # 0.75% chase buffer above entry_high (e.g. ₹20 on ₹2500)
+AGENT_SCANNER_ENFORCE_200MA = False         # Do not require long-term 200 SMA on intraday momentum scanner breakouts
+MIN_RISK_MULTIPLIER_FLOOR = 0.25            # Floor to prevent total paralysis from missing feeds
 
 
 # Safe defaults used whenever the pre-market agent fails or returns invalid output
@@ -195,4 +196,7 @@ STOCK_LOT_SIZES: dict[str, int] = {
 DEFAULT_STOCK_OPTION_LOT = 250
 MAX_OPTION_POSITION_VALUE = 75000.0
 MAX_OPTION_RISK_PER_TRADE = 2500.0
+OPTION_STRIKE_TYPE = "ITM"       # "ITM" (In-The-Money only) or "ATM"
+OPTION_ITM_DEPTH = 1             # 1 = Nearest ITM strike (1 strike ITM for peak liquidity & delta)
+AGENT_TRADE_OPTIONS = True       # When True, the agent executes trade signals as ITM option contracts
 

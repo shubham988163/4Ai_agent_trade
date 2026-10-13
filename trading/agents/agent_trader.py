@@ -51,10 +51,15 @@ from trading.config import (
     AGENT_SCANNER_ENABLED,
     AGENT_SCANNER_MAX,
     AGENT_SCANNER_REQUIRE_ENTRY_BAND,
+    AGENT_SCANNER_CHASE_TOLERANCE_PCT,
+    AGENT_SCANNER_ENFORCE_200MA,
     AGENT_SCANNER_STRATEGY_ID,
     AGENT_SCANNER_TIERS,
+    AGENT_TRADE_OPTIONS,
     MAX_POSITION_VALUE,
     NIFTY50,
+    OPTION_ITM_DEPTH,
+    OPTION_STRIKE_TYPE,
     RISK_PER_TRADE,
     SCAN_UNIVERSE,
     WATCHLIST,
@@ -92,6 +97,30 @@ AGENT_SYSTEM = (
     "Risk distance must NOT exceed 1.5x ATR (if risk > 1.5x ATR, trade is skipped -> HOLD).\n"
     "6. Execution Threshold: Only setups satisfying all rules receive high conviction (>=7/10). If any rule fails, action MUST be HOLD with conviction <=5.\n"
     "7. Data Integrity Invariant: Use only supplied data; null = not provided. Never invent or extrapolate missing figures."
+)
+
+SCANNER_AGENT_SYSTEM = (
+    "You are a professional, disciplined Multi-Agent Trading Council evaluating High-Probability "
+    "F&O Momentum & Breakout setups on the National Stock Exchange of India (NSE).\n"
+    "Your panel consists of:\n"
+    "1. Technical Analyst: Evaluates price momentum, relative volume (RVOL), relative strength vs NIFTY, and market structure.\n"
+    "2. Bullish Researcher: Formulates the Long breakout thesis focusing on institutional volume expansion, "
+    "F&O Open Interest buildup (Long Buildup / Short Covering), and sector leadership.\n"
+    "3. Bearish Researcher: Identifies downside risks, overhead resistance, overextended moves, or market-wide headwinds.\n"
+    "4. Trader Decision Agent: Synthesizes the debate into a disciplined BUY or HOLD decision adhering to the momentum rulebook.\n\n"
+    "MANDATORY F&O MOMENTUM SCANNER RULES:\n"
+    "1. Purpose: This candidate was pre-screened and scored by the F&O Quantitative Momentum Scanner (Score 0-100).\n"
+    "2. Entry & Structure: Candidate must be within or near the scanner's designated entry band. The stop loss and targets are fixed structural levels.\n"
+    "3. High Conviction (>= 7/10) Criteria: Vote BUY with conviction 7-10 when:\n"
+    "   - Candidate has a strong scanner score (>= 75) or VERDICT 'BUY' / 'WATCH'.\n"
+    "   - Strong Relative Volume (RVOL >= 1.2x) or significant session volume expansion.\n"
+    "   - Positive Relative Strength vs NIFTY or leading sector momentum.\n"
+    "   - Favorable risk-reward ratio (>= 1.5x) with structural stop-loss.\n"
+    "   - No catastrophic negative news or market crash opposing the trade.\n"
+    "4. HOLD Criteria (<= 5/10): Vote HOLD when the price has excessively extended (>2% past entry band), "
+    "volume is drying up, or heavy negative news invalidates the thesis.\n"
+    "5. Action Constraint: You may choose BUY or HOLD only. Shorting (SELL) is not permitted for this long scanner.\n"
+    "6. Data Integrity: Ground all analysis strictly in the verified facts provided."
 )
 
 
@@ -428,16 +457,19 @@ def scanner_preflight(cand, ctx: dict, *,
     if sig is None:
         return "no plan (no signal on the fetched context)"
 
-    if sig.trend_state != "up":
+    if AGENT_SCANNER_ENFORCE_200MA and sig.trend_state != "up":
         return f"scanner_trend_gate_failed (trend '{sig.trend_state}')"
 
     band = AGENT_SCANNER_REQUIRE_ENTRY_BAND if require_entry_band is None else require_entry_band
     if band:
         t = cand.trade
         ltp = (ctx or {}).get("ltp") or cand.levels.price
-        if not (t.entry_low <= ltp <= t.entry_high):
+        max_entry = round(t.entry_high * (1.0 + AGENT_SCANNER_CHASE_TOLERANCE_PCT), 2)
+        if ltp < t.entry_low:
+            return f"below entry band {t.entry_low:.2f}-{t.entry_high:.2f} (ltp {ltp:.2f}) — waiting for breakout"
+        if ltp > max_entry:
             return (f"outside entry band {t.entry_low:.2f}-{t.entry_high:.2f} "
-                    f"(ltp {ltp:.2f}) — not chasing")
+                    f"(ltp {ltp:.2f} > max {max_entry:.2f}) — too extended, not chasing")
     return None
 
 
@@ -611,22 +643,22 @@ def evaluate_scanner_candidate(
     ])
 
     prompt = f"""Evaluate trading opportunity for NSE stock: {cand.symbol} — SOURCED FROM THE F&O LONG SCANNER.
-MARKET FACTS (VERIFIED DETERMINISTIC AUDIT — the opening range, 200MA, VWAP and volume facts below are computed here from real bars by the ORB + Multi-TF 200MA strategy):
+MARKET FACTS (VERIFIED DETERMINISTIC AUDIT):
 ```json
 {facts_str}
 ```
 
-SCANNER CONTEXT (the scanner's own read — additional evidence, not a substitute for your rules):
+SCANNER CONTEXT (the scanner's own read — quantitative momentum, volume, and OI analysis):
 {scanner_block}
 
 PANEL INSTRUCTIONS:
-- Candidate Side is BUY only; the F&O scanner is a long scanner. You may decide BUY or HOLD. You CANNOT select SELL.
+- Candidate Side is BUY only; the F&O scanner is a long momentum scanner. You may decide BUY or HOLD. You CANNOT select SELL.
 - The entry, stop-loss and target in MarketFacts are the SCANNER'S structural plan. They are code-owned: judge whether to take the trade, but do not re-derive or propose different levels.
-- YOUR ORB + MULTI-TIMEFRAME 200MA RULES REMAIN MANDATORY. This name was picked by a different rulebook (opening range, VWAP, EMA20/50, RVOL, futures OI, sector), so treat your rules as a second, independent gate — not as already satisfied.
-- In particular, this candidate did NOT necessarily produce an ORB breakout, and its opening-range width and 200MA trend have NOT been pre-screened for you. If the Opening Range gate, the 200MA trend gate, the volume rule or the VWAP rule fails on the facts above, action MUST be HOLD with conviction <= 5.
-- Bullish Researcher builds the upside thesis; Bearish Researcher audits downside risk and false breakout risk.
-- Ground all arguments strictly in the supplied data. Use only supplied data; null = not provided. Never invent or extrapolate missing figures.
-- Conviction >= 7 only if the ORB + 200MA rules hold AND the scanner evidence and the risk profile align."""
+- Evaluate the candidate based on MOMENTUM, RELATIVE STRENGTH, RVOL, OPEN INTEREST, and SECTOR STRENGTH from the scanner context and technical facts.
+- Do NOT reject merely because 15m OR width is wide or 1H 200MA is mixed: high-momentum intraday breakout names regularly trade independently of multi-month 200 SMAs.
+- Conviction >= 7 and action BUY should be chosen if the candidate has a strong scanner score (>= 75), strong volume (RVOL >= 1.2x or vol confirmed), solid R:R (>= 1.5), and no catastrophic negative news.
+- Bullish Researcher builds the upside momentum thesis; Bearish Researcher audits false breakout or extension risk.
+- Ground all arguments strictly in the supplied data. Use only supplied data; null = not provided."""
 
     fallback = AgentTradeRecommendation(
         symbol=cand.symbol,
@@ -635,8 +667,7 @@ PANEL INSTRUCTIONS:
         stop_loss=sig.stop_loss,
         target=sig.target,
         conviction=1,
-        technical_analysis=(f"Scanner-sourced candidate. Trend: {trend_state}. "
-                            f"Scanner score {cand.score:.0f}/100 ({cand.verdict})."),
+        technical_analysis=(f"Scanner-sourced candidate. Momentum score {cand.score:.0f}/100 ({cand.verdict})."),
         bull_case="Bull case evaluated.",
         bear_case="Risk audit evaluated.",
         decision_rationale="Fallback: Hold mandated due to LLM failure.",
@@ -646,7 +677,7 @@ PANEL INSTRUCTIONS:
 
     rec = call_structured(
         agent_name="agent_trader",
-        system=AGENT_SYSTEM,
+        system=SCANNER_AGENT_SYSTEM,
         prompt=prompt,
         output_model=AgentTradeRecommendation,
         fallback=fallback,
@@ -660,6 +691,7 @@ def execute_recommendation(
     router: ExecutionRouter,
     min_conviction: int = AGENT_MIN_CONVICTION,
     strategy_id: str = "orb_ma200_agents",
+    as_option: bool | None = None,
 ) -> dict:
     """Route an approved recommendation through ExecutionRouter.
 
@@ -711,6 +743,43 @@ def execute_recommendation(
     if rec.conviction < min_conviction:
         _record_outcome(f"Conviction {rec.conviction}/10 below threshold {min_conviction}/10")
         return result
+
+    use_options = AGENT_TRADE_OPTIONS if as_option is None else as_option
+    if use_options:
+        try:
+            from trading.options_engine import select_option_for_underlying
+            opt_sig = select_option_for_underlying(
+                symbol=rec.symbol,
+                side=rec.action,
+                spot_price=entry,
+                stop_loss=rec.stop_loss,
+                target=rec.target,
+                strike_type=OPTION_STRIKE_TYPE,
+                itm_depth=OPTION_ITM_DEPTH,
+            )
+            if opt_sig:
+                opt_sig["strategy_id"] = f"{strategy_id}_option"
+                opt_sig["trend_state"] = getattr(rec, "trend_state", "unavailable")
+                opt_sig["regime"] = router.day_config.get("regime", "trending")
+                trade_id = router.execute(opt_sig)
+                if trade_id is not None:
+                    _record_outcome(None, trade_id=trade_id, executed=True)
+                    result["qty"] = opt_sig["qty"]
+                    result["is_option"] = True
+                    result["option_symbol"] = opt_sig["symbol"]
+                    result["strike"] = opt_sig["strike"]
+                    result["moneyness"] = opt_sig.get("moneyness", "ITM")
+                    notify(
+                        f"AI Trader Executed ITM Option on {rec.symbol}",
+                        f"{opt_sig['symbol']} ({opt_sig.get('moneyness', 'ITM')}) Qty: {opt_sig['qty']} @ {opt_sig['price']:.2f} | SL: {opt_sig['stop_loss']:.2f} | Target: {opt_sig['target']:.2f} (Conviction: {rec.conviction}/10)",
+                    )
+                    return result
+                else:
+                    _record_outcome(router.last_rejection or "Option risk kernel rejection")
+                    return result
+        except Exception:
+            # Fall back to cash equity sizing below if option build encounters unexpected issues
+            pass
 
     # Size calculation (0.5% risk per trade)
     risk_budget = RISK_PER_TRADE * router.day_config.get("risk_multiplier", 0.5)
@@ -785,6 +854,7 @@ def _run_scanner_pass(
     budget: int,
     dry_run: bool,
     require_entry_band: bool | None = None,
+    trade_options: bool | None = None,
 ) -> tuple[list[dict], int]:
     """Work the scanner's candidate list. Returns (results, executed_count).
 
@@ -847,6 +917,19 @@ def _run_scanner_pass(
             continue
 
         if dry_run:
+            # The decision path ran in full; only the order is withheld. Persist
+            # the council's verdict on the candidate audit row (not the trades
+            # table) so a dry run still records what the council decided instead
+            # of leaving council_action NULL as if it was never evaluated.
+            if ledger and getattr(rec, "candidate_id", None):
+                ledger.update_candidate_decision(rec.candidate_id, {
+                    "action": rec.action,
+                    "conviction": rec.conviction,
+                    "reasons": rec.decision_rationale,
+                    "executed": False,
+                    "trade_id": None,
+                    "rejection_reason": "dry_run (not routed)",
+                })
             print(f"    DRY RUN [{rec.action} {rec.conviction}/10] — not routed")
             print(f"    Thesis: {rec.decision_rationale}")
             results.append({"symbol": sym, "action": rec.action,
@@ -856,7 +939,8 @@ def _run_scanner_pass(
             continue
 
         exec_res = execute_recommendation(rec, router, min_conviction=min_conviction,
-                                          strategy_id=AGENT_SCANNER_STRATEGY_ID)
+                                          strategy_id=AGENT_SCANNER_STRATEGY_ID,
+                                          as_option=trade_options)
         results.append(exec_res)
         if exec_res["executed"]:
             executed += 1
@@ -882,6 +966,7 @@ def scan_and_trade(
     dry_run: bool = False,
     tiers=None,
     require_entry_band: bool | None = None,
+    trade_options: bool | None = None,
 ) -> list[dict]:
     """Scan candidate symbols, run multi-agent evaluation, and execute qualifying setups.
 
@@ -950,6 +1035,7 @@ def scan_and_trade(
                 budget=max_trades - executed_count,
                 dry_run=dry_run,
                 require_entry_band=require_entry_band,
+                trade_options=trade_options,
             )
             results.extend(scan_results)
 
@@ -974,7 +1060,19 @@ def scan_and_trade(
             continue
 
         if dry_run:
-            # The whole decision path ran; only the order is withheld.
+            # The whole decision path ran; only the order is withheld. Persist
+            # the council's verdict on the candidate audit row (not the trades
+            # table) so a dry run still records what the council decided instead
+            # of leaving council_action NULL as if it was never evaluated.
+            if ledger and getattr(rec, "candidate_id", None):
+                ledger.update_candidate_decision(rec.candidate_id, {
+                    "action": rec.action,
+                    "conviction": rec.conviction,
+                    "reasons": rec.decision_rationale,
+                    "executed": False,
+                    "trade_id": None,
+                    "rejection_reason": "dry_run (not routed)",
+                })
             print(f"DRY RUN [{rec.action} {rec.conviction}/10] — not routed")
             print(f"    Thesis: {rec.decision_rationale}")
             results.append({"symbol": symbol, "action": rec.action,
@@ -983,7 +1081,7 @@ def scan_and_trade(
                             "details": rec.model_dump()})
             continue
 
-        exec_res = execute_recommendation(rec, router, min_conviction=min_conviction)
+        exec_res = execute_recommendation(rec, router, min_conviction=min_conviction, as_option=trade_options)
         results.append(exec_res)
 
         action_tag = f"[{rec.action} {rec.conviction}/10]"
@@ -1031,11 +1129,18 @@ def main():
                        help="Only the scanner's BUY picks, no WATCH names")
     parser.set_defaults(tiers=None)
     parser.add_argument("--no-entry-band", dest="require_entry_band", action="store_false",
-                        default=None,
-                        help="Enter even when price is above the scanner's entry band "
-                             "(i.e. allow chasing an extended setup)")
+                         default=None,
+                         help="Enter even when price is above the scanner's entry band "
+                              "(i.e. allow chasing an extended setup)")
     parser.add_argument("--dry-run", action="store_true",
-                        help="Run the whole decision path, print the call per name, write no trades")
+                         help="Run the whole decision path, print the call per name, write no trades")
+
+    opt_grp = parser.add_mutually_exclusive_group()
+    opt_grp.add_argument("--options", dest="trade_options", action="store_true", default=None,
+                         help="Execute qualifying signals as In-The-Money (ITM) options")
+    opt_grp.add_argument("--shares", dest="trade_options", action="store_false",
+                         help="Execute qualifying signals as equity shares (cash)")
+
     args = parser.parse_args()
 
     symbols = None
@@ -1058,6 +1163,7 @@ def main():
         dry_run=args.dry_run,
         tiers=args.tiers,
         require_entry_band=args.require_entry_band,
+        trade_options=args.trade_options,
     )
 
 

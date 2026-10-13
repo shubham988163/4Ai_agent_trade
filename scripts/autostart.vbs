@@ -12,6 +12,8 @@ WshShell.CurrentDirectory = projectDir
 Dim pythonExe
 If fso.FileExists(projectDir & "\.venv\Scripts\pythonw.exe") Then
     pythonExe = projectDir & "\.venv\Scripts\pythonw.exe"
+ElseIf fso.FileExists("C:\Users\shubham.panchal\AppData\Local\Programs\Python\Python312\pythonw.exe") Then
+    pythonExe = "C:\Users\shubham.panchal\AppData\Local\Programs\Python\Python312\pythonw.exe"
 Else
     pythonExe = "pythonw.exe"
 End If

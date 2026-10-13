@@ -542,11 +542,20 @@ def get_data(date: str | None) -> dict:
                     exit_reason = "target_reached"
                 else:
                     fill = current_sl * (1 - SLIPPAGE_PCT) if side == "BUY" else current_sl * (1 + SLIPPAGE_PCT)
-                    # Use ltp if price gapped severely past stop
-                    if side == "BUY":
-                        exit_price = min(round(fill, 2), round(ltp, 2))
+                    if is_be_protected:
+                        # Breakeven trailing stop: resting stop triggers and executes at the protected level.
+                        # Do not let normal 5-second polling tick noise simulate an exit below breakeven.
+                        exit_price = round(fill, 2)
+                        if side == "BUY" and exit_price < be_level:
+                            exit_price = round(be_level, 2)
+                        elif side == "SELL" and exit_price > be_level:
+                            exit_price = round(be_level, 2)
                     else:
-                        exit_price = max(round(fill, 2), round(ltp, 2))
+                        # Initial structural stop: use ltp if price gapped severely past stop
+                        if side == "BUY":
+                            exit_price = min(round(fill, 2), round(ltp, 2))
+                        else:
+                            exit_price = max(round(fill, 2), round(ltp, 2))
                     exit_reason = "trailing_stop_hit" if is_be_protected else "stop_loss_hit"
 
                 if is_opt:
@@ -632,6 +641,180 @@ def get_data(date: str | None) -> dict:
                 "auto_exit_on_stop": AUTO_EXIT_ON_STOP,
             },
             "day_pnl_all_time": ledger.day_realized_pnl(date) if date else 0}
+
+
+def classify_instrument(symbol: str) -> dict:
+    s = str(symbol).upper().strip()
+    is_opt = ("CE" in s or "PE" in s or "OPT" in s)
+    if is_opt:
+        if "BANKNIFTY" in s or "BANK NIFTY" in s:
+            return {
+                "key": "banknifty_option",
+                "label": "Bank Nifty Option",
+                "icon": "🏦",
+                "color": "#c084fc",
+                "badge": "banknifty",
+                "tag": "Bank Nifty",
+            }
+        elif "NIFTY" in s:
+            return {
+                "key": "nifty_option",
+                "label": "Nifty Option",
+                "icon": "⚡",
+                "color": "#38bdf8",
+                "badge": "nifty",
+                "tag": "Nifty 50",
+            }
+        else:
+            return {
+                "key": "stock_option",
+                "label": "Stock Option",
+                "icon": "🎯",
+                "color": "#34d399",
+                "badge": "stockopt",
+                "tag": "Stock Option",
+            }
+    else:
+        return {
+            "key": "stock",
+            "label": "Stock (Cash)",
+            "icon": "📈",
+            "color": "#fbbf24",
+            "badge": "stock",
+            "tag": "Equity Cash",
+        }
+
+
+def get_target_data(from_today: bool = True, start_date: str | None = None) -> dict:
+    starting_capital = 15000.0
+    target_capital = 100000.0
+
+    today = datetime.now(IST).strftime("%Y-%m-%d")
+    effective_start = start_date or (today if from_today else None)
+
+    conn = sqlite3.connect(str(DB_PATH))
+    conn.row_factory = sqlite3.Row
+    if effective_start:
+        all_raw_trades = [dict(r) for r in conn.execute(
+            "SELECT * FROM trades WHERE date >= ? ORDER BY ts DESC", (effective_start,)
+        ).fetchall()]
+    else:
+        all_raw_trades = [dict(r) for r in conn.execute(
+            "SELECT * FROM trades ORDER BY ts DESC"
+        ).fetchall()]
+    conn.close()
+
+    open_trades = [t for t in all_raw_trades if t.get("status") == "open"]
+    ltp_map = {}
+    if open_trades:
+        syms = list({t["symbol"] for t in open_trades if t.get("symbol")})
+        ltp_map = _get_batch_ltp(syms)
+
+    categories = {
+        "stock": {"key": "stock", "label": "Equity Stocks (Cash)", "icon": "📈", "color": "#fbbf24", "trades": 0, "closed": 0, "open": 0, "wins": 0, "losses": 0, "realized_pnl": 0.0, "unrealized_pnl": 0.0, "total_pnl": 0.0, "charges": 0.0},
+        "stock_option": {"key": "stock_option", "label": "Stock Options (F&O)", "icon": "🎯", "color": "#34d399", "trades": 0, "closed": 0, "open": 0, "wins": 0, "losses": 0, "realized_pnl": 0.0, "unrealized_pnl": 0.0, "total_pnl": 0.0, "charges": 0.0},
+        "nifty_option": {"key": "nifty_option", "label": "Nifty Options", "icon": "⚡", "color": "#38bdf8", "trades": 0, "closed": 0, "open": 0, "wins": 0, "losses": 0, "realized_pnl": 0.0, "unrealized_pnl": 0.0, "total_pnl": 0.0, "charges": 0.0},
+        "banknifty_option": {"key": "banknifty_option", "label": "Bank Nifty Options", "icon": "🏦", "color": "#c084fc", "trades": 0, "closed": 0, "open": 0, "wins": 0, "losses": 0, "realized_pnl": 0.0, "unrealized_pnl": 0.0, "total_pnl": 0.0, "charges": 0.0},
+    }
+
+    enriched_trades = []
+    total_realized = 0.0
+    total_unrealized = 0.0
+    total_charges = 0.0
+
+    for t in all_raw_trades:
+        cat_info = classify_instrument(t["symbol"])
+        cat_key = cat_info["key"]
+        t["category"] = cat_key
+        t["category_label"] = cat_info["label"]
+        t["category_icon"] = cat_info["icon"]
+        t["category_color"] = cat_info["color"]
+        t["badge_class"] = cat_info["badge"]
+        t["category_tag"] = cat_info["tag"]
+
+        entry = float(t.get("entry_price") or 0.0)
+        qty = int(t.get("qty") or 1)
+        side = str(t.get("side", "BUY")).upper()
+        sym = t.get("symbol", "")
+
+        is_open = t.get("status") == "open"
+        real_ltp = ltp_map.get(sym) or entry
+        t["current_price"] = round(real_ltp, 2)
+
+        if is_open:
+            pnl = (real_ltp - entry) * qty if side == "BUY" else (entry - real_ltp) * qty
+            pnl_pct = ((real_ltp - entry) / entry * 100) if entry else 0.0
+            t["pnl"] = round(pnl, 2)
+            t["floating_pnl"] = round(pnl, 2)
+            t["pnl_pct"] = round(pnl_pct, 2)
+            total_unrealized += pnl
+            categories[cat_key]["open"] += 1
+            categories[cat_key]["unrealized_pnl"] += pnl
+        else:
+            pnl = float(t.get("pnl") or 0.0)
+            exit_px = float(t.get("exit_price") or entry)
+            pnl_pct = ((exit_px - entry) / entry * 100) if entry and side == "BUY" else (((entry - exit_px) / entry * 100) if entry else 0.0)
+            t["pnl_pct"] = round(pnl_pct, 2)
+            total_realized += pnl
+            categories[cat_key]["closed"] += 1
+            categories[cat_key]["realized_pnl"] += pnl
+            if pnl > 0:
+                categories[cat_key]["wins"] += 1
+            else:
+                categories[cat_key]["losses"] += 1
+
+        chg = float(t.get("charges") or 0.0)
+        total_charges += chg
+        categories[cat_key]["trades"] += 1
+        categories[cat_key]["charges"] += chg
+
+        dt_str = datetime.fromtimestamp(t.get("ts", time.time()), IST).strftime("%d %b %H:%M")
+        t["formatted_time"] = dt_str
+        enriched_trades.append(t)
+
+    for c in categories.values():
+        c["total_pnl"] = round(c["realized_pnl"] + c["unrealized_pnl"], 2)
+        c["realized_pnl"] = round(c["realized_pnl"], 2)
+        c["unrealized_pnl"] = round(c["unrealized_pnl"], 2)
+        c["charges"] = round(c["charges"], 2)
+        c["win_rate"] = round((c["wins"] / c["closed"] * 100), 1) if c["closed"] > 0 else None
+
+    total_net_pnl = round(total_realized + total_unrealized, 2)
+    current_capital = round(starting_capital + total_net_pnl, 2)
+    progress_pct = max(0.0, min(100.0, round(((current_capital - starting_capital) / (target_capital - starting_capital)) * 100, 2)))
+    remaining = max(0.0, round(target_capital - current_capital, 2))
+    growth_pct = round((total_net_pnl / starting_capital) * 100, 2)
+
+    closed_all = [t for t in enriched_trades if t.get("status") == "closed"]
+    wins_all = [t for t in closed_all if (t.get("pnl") or 0) > 0]
+    total_wins_amt = sum(t.get("pnl") or 0 for t in wins_all)
+    losses_all = [t for t in closed_all if (t.get("pnl") or 0) <= 0]
+    total_losses_amt = abs(sum(t.get("pnl") or 0 for t in losses_all))
+    profit_factor = round(total_wins_amt / total_losses_amt, 2) if total_losses_amt > 0 else (99.0 if total_wins_amt > 0 else 1.0)
+    overall_win_rate = round(len(wins_all) / len(closed_all) * 100, 1) if closed_all else 0.0
+
+    return {
+        "starting_capital": starting_capital,
+        "target_capital": target_capital,
+        "current_capital": current_capital,
+        "total_net_pnl": total_net_pnl,
+        "total_realized_pnl": round(total_realized, 2),
+        "total_unrealized_pnl": round(total_unrealized, 2),
+        "total_charges": round(total_charges, 2),
+        "progress_pct": progress_pct,
+        "remaining": remaining,
+        "growth_pct": growth_pct,
+        "profit_factor": profit_factor,
+        "overall_win_rate": overall_win_rate,
+        "total_trades": len(enriched_trades),
+        "open_trades_count": len(open_trades),
+        "closed_trades_count": len(closed_all),
+        "scope": "today" if from_today else "all",
+        "start_date": effective_start or "all",
+        "today_date": today,
+        "categories": list(categories.values()),
+        "trades": enriched_trades,
+    }
 
 
 _PAGE_TEMPLATE = r"""<!doctype html>
@@ -1591,6 +1774,17 @@ function renderTiles(d){
   mk("Trades", String(s.trades)+(s.open?` (${s.open} open)`:""));
   mk("Charges (INR)", fmt(s.charges)+(s.est_open_charges?` (~₹${fmt(s.total_charges)} est)`:""));
   mk("Rejections today", String(s.rejections_today));
+
+  const startingCap = 15000;
+  const targetCap = 100000;
+  const curCap = startingCap + net;
+  const progPct = Math.max(0, Math.min(100, ((curCap - startingCap) / (targetCap - startingCap) * 100))).toFixed(1);
+  mk("🎯 15K → 1L Target", `₹${fmt(curCap)}`, {
+    hero: false,
+    dir: net>=0?"up":"down",
+    delta: `<a href="/target" style="color:#10b981;font-weight:700;text-decoration:none">Goal: ₹1 Lakh (${progPct}%) · Details →</a>`,
+    deltaHtml: true
+  });
 }
 
 function renderCfg(d){
@@ -1631,7 +1825,7 @@ function renderTrades(d){
       openT.append(el("caption","empty","No active open positions. Launch an AI Agent Scan or take a paper trade."));
     } else {
       const head = el("tr");
-      ["#","time","symbol","side","current price","qty","entry","SL","trailed SL","action","floating P&L","est charges","strategy","verdict","reasons"]
+      ["#","time","symbol","side","current price","qty","entry","Initial SL","Active Trailed SL","action","floating P&L","est charges","strategy","verdict","reasons"]
         .forEach((h,i)=>{const th=el("th",[4,5,6,7,8,9,10,11].includes(i)?"num":null,h); head.append(th);});
       openT.append(head);
 
@@ -1653,25 +1847,25 @@ function renderTrades(d){
         row.append(el("td","num",String(tr.qty)));
         row.append(el("td","num",fmt(tr.entry_price)));
 
-        // 1. Initial Structural Stop Loss (SL)
+        // 1. Initial Structural Stop Loss (Initial SL)
         const initialSlVal = tr.initial_stop != null ? tr.initial_stop : tr.stop_loss;
         const slTd = el("td","num");
         slTd.innerHTML = initialSlVal != null
-          ? `<span style="font-family:ui-monospace,monospace;font-size:11.5px;color:var(--ink-2);font-weight:600">₹${fmt(initialSlVal)}</span>`
+          ? `<span style="font-family:ui-monospace,monospace;font-size:11.5px;color:var(--ink-2);font-weight:600" title="Initial Structural Stop Loss set at entry">₹${fmt(initialSlVal)}</span>`
           : `<span class="muted">—</span>`;
         row.append(slTd);
 
-        // 2. Dynamic Trailed Stop Loss (trailed SL)
+        // 2. Dynamic Working Trailed Stop Loss (Active Trailed SL)
         const trailTd = el("td","num");
         const currentSl = tr.stop_loss != null ? tr.stop_loss : initialSlVal;
         const wrap = el("div");
         wrap.style.cssText = "display:flex;flex-direction:column;align-items:flex-end;gap:2px";
         if(tr.is_trailed_above_be){
-          wrap.innerHTML = `<span class="badge sm bull" style="font-family:ui-monospace,monospace;font-size:10px;font-weight:700;padding:2px 6px" title="Trailed SL locking in gains">🚀 ₹${fmt(currentSl)}</span><span style="font-size:8.5px;color:var(--up);font-weight:600">Locked Gain</span>`;
+          wrap.innerHTML = `<span class="badge sm bull" style="font-family:ui-monospace,monospace;font-size:10px;font-weight:700;padding:2px 6px" title="Active Trailed SL locking in gains above breakeven">🚀 ₹${fmt(currentSl)}</span><span style="font-size:8.5px;color:var(--up);font-weight:600">Locked Gain</span>`;
         } else if(tr.is_breakeven_protected){
           wrap.innerHTML = `<span class="badge sm" style="font-family:ui-monospace,monospace;font-size:10px;font-weight:700;padding:2px 6px;background:rgba(46,189,133,0.15);border-color:rgba(46,189,133,0.4);color:var(--up)" title="Breakeven Protected: Covers all statutory charges + slippage. Net profit cannot go negative.">🛡️ BE: ₹${fmt(currentSl)}</span><span style="font-size:8.5px;color:var(--up);font-weight:600">Zero Loss</span>`;
         } else if(currentSl != null && initialSlVal != null && Math.abs(currentSl - initialSlVal) > 0.01){
-          wrap.innerHTML = `<span style="font-family:ui-monospace,monospace;font-size:11px;font-weight:600;color:var(--ink)">₹${fmt(currentSl)}</span>`;
+          wrap.innerHTML = `<span class="badge sm bull" style="font-family:ui-monospace,monospace;font-size:10px;font-weight:700;padding:2px 6px;background:rgba(46,189,133,0.15);border-color:rgba(46,189,133,0.4);color:var(--up)" title="Active Trailed SL protecting trade">🛡️ ₹${fmt(currentSl)}</span><span style="font-size:8.5px;color:var(--up);font-weight:600">Trailed SL</span>`;
         } else {
           wrap.innerHTML = `<span class="muted" style="font-size:10.5px" title="Awaiting arming condition">awaiting arm</span>`;
         }
@@ -2497,6 +2691,631 @@ PAGE = (_PAGE_TEMPLATE
         .replace("__THEMEJS__", ui_theme.THEME_JS))
 
 
+_TARGET_PAGE_TEMPLATE = r"""<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>🎯 15K → 1L Target Challenge · Trading Agent</title>
+<style>
+__THEME__
+/* Target Challenge Page Styles */
+.target-hero {
+  background: linear-gradient(135deg, rgba(16, 185, 129, 0.08) 0%, rgba(56, 189, 248, 0.05) 50%, rgba(99, 102, 241, 0.08) 100%);
+  border: 1px solid var(--line-2);
+  border-radius: 14px;
+  padding: 22px 24px;
+  margin-top: 16px;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.45);
+  position: relative;
+  overflow: hidden;
+}
+.target-hero::after {
+  content: "";
+  position: absolute;
+  top: -50px;
+  right: -50px;
+  width: 220px;
+  height: 220px;
+  background: radial-gradient(circle, rgba(16, 185, 129, 0.15) 0%, transparent 70%);
+  pointer-events: none;
+}
+.target-bar-wrap {
+  background: var(--cell);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 18px 20px;
+  margin-top: 18px;
+}
+.progress-track {
+  width: 100%;
+  height: 20px;
+  background: rgba(14, 23, 40, 0.9);
+  border: 1px solid var(--line-2);
+  border-radius: 10px;
+  overflow: hidden;
+  position: relative;
+  box-shadow: inset 0 2px 4px rgba(0,0,0,0.6);
+}
+.progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #3b82f6 0%, #10b981 50%, #f59e0b 80%, #ec4899 100%);
+  border-radius: 9px;
+  transition: width 0.6s cubic-bezier(0.4, 0, 0.2, 1);
+  position: relative;
+  min-width: 4px;
+}
+.progress-fill::after {
+  content: "";
+  position: absolute;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.35), transparent);
+  animation: shine 2.5s infinite;
+}
+@keyframes shine {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+.milestones {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 10px;
+  font-size: 11px;
+  color: var(--ink-3);
+  position: relative;
+}
+.milestone {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  font-family: ui-monospace, monospace;
+  transition: color 0.2s ease;
+}
+.milestone.active {
+  color: #10b981;
+  font-weight: 700;
+}
+.category-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 12px;
+  margin-top: 16px;
+}
+.cat-card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 16px 18px;
+  box-shadow: var(--shadow);
+  cursor: pointer;
+  transition: all 0.2s ease;
+  position: relative;
+  overflow: hidden;
+}
+.cat-card:hover {
+  transform: translateY(-2px);
+  border-color: var(--line-2);
+  background: var(--cell);
+}
+.cat-card.selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+.cat-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  font-size: 10.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.badge-stock { background: rgba(251, 191, 36, 0.12); color: #fbbf24; border: 1px solid rgba(251, 191, 36, 0.35); }
+.badge-stockopt { background: rgba(52, 211, 153, 0.12); color: #34d399; border: 1px solid rgba(52, 211, 153, 0.35); }
+.badge-nifty { background: rgba(56, 189, 248, 0.12); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.35); }
+.badge-banknifty { background: rgba(192, 132, 252, 0.12); color: #c084fc; border: 1px solid rgba(192, 132, 252, 0.35); }
+.filter-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 18px;
+  padding-bottom: 8px;
+}
+.filter-tabs {
+  display: inline-flex;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--cell);
+  overflow: hidden;
+}
+.filter-btn {
+  background: transparent;
+  border: none;
+  padding: 7px 13px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--ink-3);
+  cursor: pointer;
+  letter-spacing: 0.05em;
+  transition: background 0.15s, color 0.15s;
+}
+.filter-btn + .filter-btn {
+  border-left: 1px solid var(--line);
+}
+.filter-btn.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 700;
+}
+.trade-count-badge {
+  background: rgba(255,255,255,0.08);
+  border-radius: 10px;
+  padding: 1px 6px;
+  font-size: 9.5px;
+  margin-left: 5px;
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+__TOPBAR__
+
+<div class="target-hero">
+  <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:14px">
+    <div>
+      <div style="display:flex;align-items:center;gap:10px">
+        <span style="font-size:24px">🎯</span>
+        <h1 style="margin:0;font-size:20px;font-weight:800;letter-spacing:0.02em;color:var(--ink)">15K → 1 Lakh Capital Challenge</h1>
+        <span class="badge sm bull" style="font-size:10px">Live Portfolio Tracking</span>
+      </div>
+      <p style="margin:6px 0 0;font-size:12.5px;color:var(--ink-2);max-width:700px">
+        Disciplined capital scaling from ₹15,000 to ₹1,00,000 with real-time risk control, dynamic trailing stops, and multi-asset execution across Stocks, Stock Options, Nifty & Bank Nifty.
+      </p>
+    </div>
+    <div style="text-align:right">
+      <div style="font-size:11px;color:var(--ink-3);text-transform:uppercase;letter-spacing:0.06em">Target Milestone</div>
+      <div style="font-size:26px;font-weight:800;color:var(--accent);font-family:ui-monospace,monospace">₹1,00,000</div>
+      <div style="font-size:11px;color:#10b981;font-weight:600">Base Capital: ₹15,000 (Goal: +566.7% Return)</div>
+    </div>
+  </div>
+
+  <div class="target-bar-wrap">
+    <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px">
+      <div style="display:flex;align-items:center;gap:8px">
+        <span style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:var(--ink-2)">Goal Completion Progress</span>
+        <span id="targetProgressPctBadge" class="badge sm bull" style="font-size:10px">0.0%</span>
+      </div>
+      <div style="font-size:11.5px;color:var(--ink-2);font-family:ui-monospace,monospace">
+        Current Capital: <b id="targetCurrentEquityText" style="color:var(--ink)">₹15,000</b> · Needed to 1L: <b id="targetRemainingText" style="color:var(--ink-2)">₹85,000</b>
+      </div>
+    </div>
+    <div class="progress-track">
+      <div id="targetProgressBar" class="progress-fill" style="width: 0%"></div>
+    </div>
+    <div class="milestones">
+      <div class="milestone active" id="m15k"><span>Start</span><b>₹15,000</b></div>
+      <div class="milestone" id="m25k"><span>Milestone 1</span><b>₹25,000</b></div>
+      <div class="milestone" id="m50k"><span>Halfway</span><b>₹50,000</b></div>
+      <div class="milestone" id="m75k"><span>Milestone 3</span><b>₹75,000</b></div>
+      <div class="milestone" id="m100k" style="color:var(--accent)"><span>Target Goal</span><b>₹1,00,000</b></div>
+    </div>
+  </div>
+</div>
+
+<div class="kpis" style="margin-top:16px">
+  <div class="kpi">
+    <div class="k">Current Capital</div>
+    <div id="kpiCurrentCapital" class="v mono hero up">₹15,000</div>
+    <div id="kpiCapitalDelta" class="f">Base ₹15,000</div>
+  </div>
+  <div class="kpi">
+    <div class="k">Total Net P&L (All Trades)</div>
+    <div id="kpiTotalNetPnl" class="v mono up">₹0.00</div>
+    <div id="kpiPnlBreakdown" class="f">Realized: ₹0 · Floating: ₹0</div>
+  </div>
+  <div class="kpi">
+    <div class="k">Portfolio Growth %</div>
+    <div id="kpiGrowthPct" class="v mono">0.0%</div>
+    <div id="kpiProfitFactor" class="f">Profit Factor: —</div>
+  </div>
+  <div class="kpi">
+    <div class="k">Overall Win Rate</div>
+    <div id="kpiOverallWinRate" class="v mono">—</div>
+    <div id="kpiTotalTradesCount" class="f">0 trades recorded</div>
+  </div>
+  <div class="kpi">
+    <div class="k">Total Statutory Charges</div>
+    <div id="kpiTotalCharges" class="v mono">₹0.00</div>
+    <div class="f">STT, Exchange, Stamp & GST</div>
+  </div>
+</div>
+
+<h2 style="font-size:12px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:var(--ink-3);margin:24px 0 10px;display:flex;align-items:center;gap:8px">
+  <span>📊 Asset Breakdown & Performance by Instrument</span>
+  <span style="font-size:11px;font-weight:500;color:var(--ink-3);text-transform:none">Click any card to filter trade history</span>
+</h2>
+
+<div class="category-grid" id="categoryGrid">
+  <!-- Rendered dynamically -->
+</div>
+
+<div class="filter-bar">
+  <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+    <div class="filter-tabs" id="scopeFilterTabs">
+      <button class="filter-btn active" data-scope="today">⚡ Challenge (Today 13 Oct)</button>
+      <button class="filter-btn" data-scope="all">Include Past History</button>
+    </div>
+    <div class="filter-tabs" id="categoryFilterTabs">
+      <button class="filter-btn active" data-cat="all">All Instruments <span class="trade-count-badge" id="badgeAllCount">0</span></button>
+      <button class="filter-btn" data-cat="stock">📈 Stocks (Cash) <span class="trade-count-badge" id="badgeStockCount">0</span></button>
+      <button class="filter-btn" data-cat="stock_option">🎯 Stock Options <span class="trade-count-badge" id="badgeStockOptCount">0</span></button>
+      <button class="filter-btn" data-cat="nifty_option">⚡ Nifty Options <span class="trade-count-badge" id="badgeNiftyCount">0</span></button>
+      <button class="filter-btn" data-cat="banknifty_option">🏦 Bank Nifty Options <span class="trade-count-badge" id="badgeBankNiftyCount">0</span></button>
+    </div>
+  </div>
+  <div class="filter-tabs" id="statusFilterTabs">
+    <button class="filter-btn active" data-status="all">All Trades</button>
+    <button class="filter-btn" data-status="open">Open (Active)</button>
+    <button class="filter-btn" data-status="closed">Closed History</button>
+  </div>
+</div>
+
+<section>
+  <div class="panel">
+    <h2>
+      <span>📜 Comprehensive Trade & Profit History</span>
+      <span class="sub" id="tableFilterSub">Showing today's trades</span>
+      <span class="spacer"></span>
+      <span id="targetTradeCountHeader" class="muted" style="font-size:11px">0 trades</span>
+    </h2>
+    <div class="scroll">
+      <table id="targetTradesTable">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Date & Time</th>
+            <th>Symbol</th>
+            <th>Instrument Type</th>
+            <th>Side</th>
+            <th class="num">Qty</th>
+            <th class="num">Entry Price</th>
+            <th class="num">Exit / LTP</th>
+            <th class="num">Net P&L</th>
+            <th class="num">Return %</th>
+            <th class="num">Charges</th>
+            <th class="num">Target Contribution</th>
+            <th>Status</th>
+            <th>Exit / Strategy Notes</th>
+          </tr>
+        </thead>
+        <tbody id="targetTradesBody">
+          <!-- Rendered dynamically -->
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+</div>
+
+<script>
+let TARGET_DATA = null;
+let SELECTED_SCOPE = "today";
+let SELECTED_CATEGORY = "all";
+let SELECTED_STATUS = "all";
+
+function fmt(n, decimals = 2) {
+  if (n == null || isNaN(n)) return "—";
+  return Number(n).toLocaleString("en-IN", {
+    minimumFractionDigits: decimals,
+    maximumFractionDigits: decimals
+  });
+}
+
+function selectScope(sc) {
+  SELECTED_SCOPE = sc;
+  document.querySelectorAll("#scopeFilterTabs .filter-btn").forEach(b => {
+    b.classList.toggle("active", b.getAttribute("data-scope") === sc);
+  });
+  fetchTargetData();
+}
+
+function selectCategory(cat) {
+  SELECTED_CATEGORY = cat;
+  document.querySelectorAll("#categoryFilterTabs .filter-btn").forEach(b => {
+    b.classList.toggle("active", b.getAttribute("data-cat") === cat);
+  });
+  document.querySelectorAll(".cat-card").forEach(c => {
+    c.classList.toggle("selected", c.getAttribute("data-cat") === cat);
+  });
+  renderTradesTable();
+}
+
+function selectStatus(st) {
+  SELECTED_STATUS = st;
+  document.querySelectorAll("#statusFilterTabs .filter-btn").forEach(b => {
+    b.classList.toggle("active", b.getAttribute("data-status") === st);
+  });
+  renderTradesTable();
+}
+
+document.querySelectorAll("#scopeFilterTabs .filter-btn").forEach(b => {
+  b.addEventListener("click", () => selectScope(b.getAttribute("data-scope")));
+});
+document.querySelectorAll("#categoryFilterTabs .filter-btn").forEach(b => {
+  b.addEventListener("click", () => selectCategory(b.getAttribute("data-cat")));
+});
+document.querySelectorAll("#statusFilterTabs .filter-btn").forEach(b => {
+  b.addEventListener("click", () => selectStatus(b.getAttribute("data-status")));
+});
+
+function renderProgress(d) {
+  const current = d.current_capital || d.starting_capital;
+  const start = d.starting_capital;
+  const target = d.target_capital;
+  const progressPct = d.progress_pct || 0;
+  const remaining = d.remaining || (target - current);
+
+  const bar = document.getElementById("targetProgressBar");
+  if (bar) bar.style.width = Math.min(100, Math.max(0, progressPct)) + "%";
+
+  const pctBadge = document.getElementById("targetProgressPctBadge");
+  if (pctBadge) pctBadge.textContent = progressPct.toFixed(1) + "%";
+
+  const curEquity = document.getElementById("targetCurrentEquityText");
+  if (curEquity) curEquity.textContent = "₹" + fmt(current);
+
+  const remText = document.getElementById("targetRemainingText");
+  if (remText) remText.textContent = "₹" + fmt(remaining);
+
+  // Update milestone active styling
+  const m25 = document.getElementById("m25k");
+  if (m25) m25.classList.toggle("active", current >= 25000);
+  const m50 = document.getElementById("m50k");
+  if (m50) m50.classList.toggle("active", current >= 50000);
+  const m75 = document.getElementById("m75k");
+  if (m75) m75.classList.toggle("active", current >= 75000);
+  const m100 = document.getElementById("m100k");
+  if (m100) m100.classList.toggle("active", current >= 100000);
+
+  // KPIs
+  const kpiCur = document.getElementById("kpiCurrentCapital");
+  if (kpiCur) {
+    kpiCur.textContent = "₹" + fmt(current);
+    kpiCur.className = "v mono hero " + (d.total_net_pnl >= 0 ? "up" : "down");
+  }
+
+  const kpiDelta = document.getElementById("kpiCapitalDelta");
+  if (kpiDelta) {
+    const diff = current - start;
+    kpiDelta.innerHTML = (diff >= 0 ? "▲ +₹" : "▼ -₹") + fmt(Math.abs(diff)) + " (" + (d.growth_pct >= 0 ? "+" : "") + d.growth_pct.toFixed(1) + "%) vs ₹15K base";
+    kpiDelta.style.color = diff >= 0 ? "var(--up)" : "var(--down)";
+  }
+
+  const kpiPnl = document.getElementById("kpiTotalNetPnl");
+  if (kpiPnl) {
+    kpiPnl.textContent = (d.total_net_pnl >= 0 ? "+₹" : "-₹") + fmt(Math.abs(d.total_net_pnl));
+    kpiPnl.className = "v mono " + (d.total_net_pnl >= 0 ? "up" : "down");
+  }
+
+  const kpiBrk = document.getElementById("kpiPnlBreakdown");
+  if (kpiBrk) {
+    kpiBrk.textContent = `Realized: ₹${fmt(d.total_realized_pnl)} · Floating: ${d.total_unrealized_pnl >= 0 ? '+' : ''}₹${fmt(d.total_unrealized_pnl)}`;
+  }
+
+  const kpiGrowth = document.getElementById("kpiGrowthPct");
+  if (kpiGrowth) {
+    kpiGrowth.textContent = (d.growth_pct >= 0 ? "+" : "") + d.growth_pct.toFixed(2) + "%";
+    kpiGrowth.className = "v mono " + (d.growth_pct >= 0 ? "up" : "down");
+  }
+
+  const kpiPf = document.getElementById("kpiProfitFactor");
+  if (kpiPf) {
+    kpiPf.textContent = "Profit Factor: " + (d.profit_factor != null ? d.profit_factor.toFixed(2) : "—");
+  }
+
+  const kpiWin = document.getElementById("kpiOverallWinRate");
+  if (kpiWin) {
+    kpiWin.textContent = d.overall_win_rate != null ? d.overall_win_rate.toFixed(1) + "%" : "—";
+  }
+
+  const kpiTradesCount = document.getElementById("kpiTotalTradesCount");
+  if (kpiTradesCount) {
+    const scopeLabel = d.scope === "today" ? "today" : "all time";
+    kpiTradesCount.textContent = `${d.total_trades} trades ${scopeLabel} (${d.open_trades_count} active, ${d.closed_trades_count} closed)`;
+  }
+
+  const kpiCharges = document.getElementById("kpiTotalCharges");
+  if (kpiCharges) {
+    kpiCharges.textContent = "₹" + fmt(d.total_charges);
+  }
+}
+
+function renderCategoryCards(d) {
+  const grid = document.getElementById("categoryGrid");
+  if (!grid) return;
+  grid.innerHTML = "";
+
+  const counts = { all: d.trades.length, stock: 0, stock_option: 0, nifty_option: 0, banknifty_option: 0 };
+  d.trades.forEach(t => {
+    if (counts[t.category] !== undefined) counts[t.category]++;
+  });
+
+  const bAll = document.getElementById("badgeAllCount"); if (bAll) bAll.textContent = counts.all;
+  const bStk = document.getElementById("badgeStockCount"); if (bStk) bStk.textContent = counts.stock;
+  const bOpt = document.getElementById("badgeStockOptCount"); if (bOpt) bOpt.textContent = counts.stock_option;
+  const bNif = document.getElementById("badgeNiftyCount"); if (bNif) bNif.textContent = counts.nifty_option;
+  const bBnf = document.getElementById("badgeBankNiftyCount"); if (bBnf) bBnf.textContent = counts.banknifty_option;
+
+  (d.categories || []).forEach(cat => {
+    const card = document.createElement("div");
+    card.className = "cat-card" + (SELECTED_CATEGORY === cat.key ? " selected" : "");
+    card.setAttribute("data-cat", cat.key);
+    card.onclick = () => selectCategory(SELECTED_CATEGORY === cat.key ? "all" : cat.key);
+
+    const isProfit = cat.total_pnl >= 0;
+    const wr = cat.win_rate != null ? cat.win_rate.toFixed(1) + "%" : "—";
+
+    card.innerHTML = `
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+        <div style="display:flex;align-items:center;gap:8px">
+          <span style="font-size:20px">${cat.icon}</span>
+          <div>
+            <div style="font-weight:700;font-size:13px;color:var(--ink)">${cat.label}</div>
+            <div style="font-size:10.5px;color:var(--ink-3)">${cat.trades} trade${cat.trades !== 1 ? 's' : ''} (${cat.open} open · ${cat.closed} closed)</div>
+          </div>
+        </div>
+        <span class="badge sm ${isProfit ? 'bull' : 'bear'}" style="font-family:ui-monospace,monospace;font-size:10.5px">
+          ${isProfit ? '+' : ''}₹${fmt(cat.total_pnl)}
+        </span>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;background:var(--cell);border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin-top:8px;font-size:11px">
+        <div>
+          <span style="color:var(--ink-3);display:block;font-size:9.5px;text-transform:uppercase;letter-spacing:0.06em">Win Rate</span>
+          <span style="font-family:ui-monospace,monospace;font-weight:700;color:var(--ink)">${wr}</span>
+        </div>
+        <div>
+          <span style="color:var(--ink-3);display:block;font-size:9.5px;text-transform:uppercase;letter-spacing:0.06em">Charges</span>
+          <span style="font-family:ui-monospace,monospace;color:var(--ink-2)">₹${fmt(cat.charges)}</span>
+        </div>
+        <div>
+          <span style="color:var(--ink-3);display:block;font-size:9.5px;text-transform:uppercase;letter-spacing:0.06em">Realized</span>
+          <span style="font-family:ui-monospace,monospace;font-weight:600;color:${cat.realized_pnl >= 0 ? 'var(--up)' : 'var(--down)'}">
+            ${cat.realized_pnl >= 0 ? '+' : ''}₹${fmt(cat.realized_pnl)}
+          </span>
+        </div>
+        <div>
+          <span style="color:var(--ink-3);display:block;font-size:9.5px;text-transform:uppercase;letter-spacing:0.06em">Floating</span>
+          <span style="font-family:ui-monospace,monospace;font-weight:600;color:${cat.unrealized_pnl >= 0 ? 'var(--up)' : 'var(--down)'}">
+            ${cat.unrealized_pnl >= 0 ? '+' : ''}₹${fmt(cat.unrealized_pnl)}
+          </span>
+        </div>
+      </div>
+    `;
+    grid.appendChild(card);
+  });
+}
+
+function renderTradesTable() {
+  if (!TARGET_DATA) return;
+  const tbody = document.getElementById("targetTradesBody");
+  if (!tbody) return;
+  tbody.innerHTML = "";
+
+  let trades = TARGET_DATA.trades || [];
+
+  if (SELECTED_CATEGORY !== "all") {
+    trades = trades.filter(t => t.category === SELECTED_CATEGORY);
+  }
+  if (SELECTED_STATUS !== "all") {
+    trades = trades.filter(t => t.status === SELECTED_STATUS);
+  }
+
+  const countHeader = document.getElementById("targetTradeCountHeader");
+  if (countHeader) countHeader.textContent = `${trades.length} of ${TARGET_DATA.trades.length} trades shown`;
+
+  const subFilter = document.getElementById("tableFilterSub");
+  if (subFilter) {
+    const scopeDesc = TARGET_DATA.scope === "today" ? "today's trades" : "all historical trades";
+    const catName = SELECTED_CATEGORY === "all" ? "" : ` · ${SELECTED_CATEGORY.replace("_", " ").toUpperCase()}`;
+    const stName = SELECTED_STATUS === "all" ? "" : ` (${SELECTED_STATUS} only)`;
+    subFilter.textContent = `Showing ${scopeDesc}${catName}${stName}`;
+  }
+
+  if (!trades.length) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td colspan="14" class="empty">No trades recorded for this period matching criteria.</td>`;
+    tbody.appendChild(tr);
+    return;
+  }
+
+  trades.forEach(t => {
+    const tr = document.createElement("tr");
+    const isOpen = t.status === "open";
+    const pnl = isOpen ? (t.floating_pnl || t.pnl || 0) : (t.pnl || 0);
+    const isWin = pnl > 0;
+    const isLoss = pnl < 0;
+    const pnlClass = isWin ? "up" : (isLoss ? "down" : "");
+    const exitOrLtp = isOpen ? (t.current_price || t.entry_price) : (t.exit_price || t.entry_price);
+
+    let catBadgeHtml = `<span class="cat-badge badge-stock">📈 Stock</span>`;
+    if (t.category === "stock_option") {
+      catBadgeHtml = `<span class="cat-badge badge-stockopt">🎯 Stock Opt</span>`;
+    } else if (t.category === "nifty_option") {
+      catBadgeHtml = `<span class="cat-badge badge-nifty">⚡ Nifty Opt</span>`;
+    } else if (t.category === "banknifty_option") {
+      catBadgeHtml = `<span class="cat-badge badge-banknifty">🏦 Bank Nifty Opt</span>`;
+    }
+
+    const sideBadge = t.side === "BUY" ?
+      `<span class="badge sm bull" style="font-size:9.5px;padding:1px 5px">BUY</span>` :
+      `<span class="badge sm bear" style="font-size:9.5px;padding:1px 5px">SELL</span>`;
+
+    const statusBadge = isOpen ?
+      `<span class="badge sm bull" style="font-size:9.5px;padding:2px 6px"><span class="led busy" style="width:5px;height:5px"></span>OPEN</span>` :
+      `<span class="badge sm" style="font-size:9.5px;padding:2px 6px;color:var(--ink-3)">CLOSED</span>`;
+
+    tr.innerHTML = `
+      <td style="font-family:ui-monospace,monospace;color:var(--ink-3);font-size:11px">#${t.id}</td>
+      <td style="font-size:11px;color:var(--ink-2)">${t.formatted_time || t.date}</td>
+      <td style="font-weight:700;font-size:12px;color:var(--ink)">${t.symbol}</td>
+      <td>${catBadgeHtml}</td>
+      <td>${sideBadge}</td>
+      <td class="num" style="font-family:ui-monospace,monospace;font-weight:600">${t.qty}</td>
+      <td class="num" style="font-family:ui-monospace,monospace">₹${fmt(t.entry_price)}</td>
+      <td class="num" style="font-family:ui-monospace,monospace;font-weight:600">₹${fmt(exitOrLtp)}</td>
+      <td class="num" style="font-family:ui-monospace,monospace;font-weight:700;font-size:12.5px">
+        <span class="${pnlClass}">${pnl >= 0 ? '+' : ''}₹${fmt(pnl)}</span>
+      </td>
+      <td class="num" style="font-family:ui-monospace,monospace;font-size:11px">
+        <span class="${pnlClass}">${t.pnl_pct >= 0 ? '+' : ''}${fmt(t.pnl_pct, 1)}%</span>
+      </td>
+      <td class="num" style="font-family:ui-monospace,monospace;color:var(--ink-3);font-size:11px">₹${fmt(t.charges || 0)}</td>
+      <td class="num" style="font-family:ui-monospace,monospace;font-weight:700">
+        <span class="${pnlClass}">${pnl >= 0 ? '+' : ''}₹${fmt(pnl)}</span>
+      </td>
+      <td>${statusBadge}</td>
+      <td style="font-size:11px;color:var(--ink-2)">
+        ${t.exit_reason || t.strategy || '—'}
+      </td>
+    `;
+    tbody.appendChild(tr);
+  });
+}
+
+async function fetchTargetData() {
+  try {
+    const res = await fetch("/api/target-data?scope=" + encodeURIComponent(SELECTED_SCOPE), { cache: "no-store" });
+    if (!res.ok) return;
+    TARGET_DATA = await res.json();
+    renderProgress(TARGET_DATA);
+    renderCategoryCards(TARGET_DATA);
+    renderTradesTable();
+  } catch (err) {
+    console.warn("Error fetching target data:", err);
+  }
+}
+
+fetchTargetData();
+setInterval(fetchTargetData, 2000);
+__THEMEJS__
+</script>
+</body>
+</html>
+"""
+
+_TOPBAR_RIGHT_TARGET = """<a href="/" class="btn" style="text-decoration:none">← Main Dashboard</a>
+    <div class="live"><span class="led"></span><span>Target Live</span></div>"""
+
+TARGET_PAGE = (_TARGET_PAGE_TEMPLATE
+               .replace("__THEME__", ui_theme.CSS)
+               .replace("__TOPBAR__", ui_theme.topbar("🎯 15K → 1L Target Journey", "target",
+                                                      _TOPBAR_RIGHT_TARGET))
+               .replace("__THEMEJS__", ui_theme.THEME_JS))
+
+
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):  # noqa: N802
         url = urlparse(self.path)
@@ -2506,7 +3325,15 @@ class Handler(BaseHTTPRequestHandler):
         fno = fno_web.serve(url.path, parse_qs(url.query))
         if fno is not None:
             return self._send(*fno)
-        if url.path == "/api/data":
+        if url.path in ("/api/target-data", "/api/target"):
+            q = parse_qs(url.query)
+            scope = q.get("scope", ["today"])[0]
+            from_today = (scope != "all" and q.get("all", ["0"])[0] != "1")
+            body = json.dumps(get_target_data(from_today=from_today), default=str).encode()
+            self._send(200, "application/json", body)
+        elif url.path in ("/target", "/goal", "/challenge"):
+            self._send(200, "text/html; charset=utf-8", TARGET_PAGE.encode())
+        elif url.path == "/api/data":
             q = parse_qs(url.query)
             body = json.dumps(get_data(q.get("date", [None])[0]),
                               default=str).encode()

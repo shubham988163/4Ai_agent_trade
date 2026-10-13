@@ -27,7 +27,7 @@ from pydantic import BaseModel, Field
 
 from trading.config import (TODAY_CONFIG_PATH, FALLBACK_DAY_CONFIG,
                             SCAN_UNIVERSE, RISK_CRITICAL_FEEDS,
-                            DARK_FEED_RISK_CAP)
+                            DARK_FEED_RISK_CAP, MIN_RISK_MULTIPLIER_FLOOR)
 from trading.ledger import Ledger
 from trading.agents.llm import call_structured
 
@@ -137,7 +137,7 @@ def _clamp_multiplier(value: float) -> float:
         return float(FALLBACK_DAY_CONFIG["risk_multiplier"])
     if not math.isfinite(v):
         return float(FALLBACK_DAY_CONFIG["risk_multiplier"])
-    return max(0.0, min(1.0, v))
+    return max(MIN_RISK_MULTIPLIER_FLOOR, min(1.0, v))
 
 
 def run() -> dict:
@@ -189,6 +189,11 @@ Set today's risk parameters for the scalping system."""
     # rationale truncation below: if the agent's own text runs long, the note
     # explaining why risk was cut is precisely the part that must not be lost.
     notes: list[str] = []
+
+    # If the model tries to block the ENTIRE universe, reject the blanket block.
+    if len(blocked) >= len(universe):
+        notes.append(f"rejected blanket block of all {len(blocked)} universe symbols")
+        blocked = []
 
     if ignored:
         # Dropping a block the agent asked for is itself a risk decision, so it
