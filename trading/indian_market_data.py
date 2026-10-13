@@ -110,6 +110,24 @@ WATCHLIST_METADATA: dict[str, dict[str, Any]] = {
         ],
         "is_bank": False,
     },
+    "MPHASIS": {
+        "company_name": "Mphasis Limited",
+        "aliases": ["Mphasis", "MPHASIS", "MphasiS"],
+        "negative_keywords": [],
+        "is_bank": False,
+    },
+    "NIFTY": {
+        "company_name": "Nifty 50 Index",
+        "aliases": ["Nifty", "NIFTY", "Nifty 50", "NSE Nifty"],
+        "negative_keywords": [],
+        "is_bank": False,
+    },
+    "BANKNIFTY": {
+        "company_name": "Bank Nifty Index",
+        "aliases": ["Bank Nifty", "BANKNIFTY", "Nifty Bank"],
+        "negative_keywords": [],
+        "is_bank": True,
+    },
 }
 
 # 2. Approved Indian Financial Publishers Whitelist
@@ -130,6 +148,18 @@ APPROVED_PUBLISHERS = [
     "nse",
     "bse",
     "sebi",
+    # Additional verified Indian financial news publishers
+    "ndtv profit",
+    "ndtv",
+    "the hindu business line",
+    "business line",
+    "times of india",
+    "the times of india",
+    "zee business",
+    "bq prime",
+    "rediff",
+    "equitymaster",
+    "kalkine india",
 ]
 
 
@@ -141,6 +171,64 @@ def is_approved_source(source_str: str) -> bool:
     return any(appr in src_lower for appr in APPROVED_PUBLISHERS)
 
 
+def fetch_google_news_rss(query: str, max_items: int = 10) -> list[dict]:
+    """Fetch live Indian financial news headlines from Google News RSS feed.
+    
+    Provides reliable, real-time news headlines with timestamps and publisher attribution,
+    bypassing yfinance empty news return.
+    """
+    import urllib.parse
+    import urllib.request
+    import xml.etree.ElementTree as ET
+    from email.utils import parsedate_to_datetime
+
+    encoded_q = urllib.parse.quote(query)
+    url = f"https://news.google.com/rss/search?q={encoded_q}&hl=en-IN&gl=IN&ceid=IN:en"
+    req = urllib.request.Request(
+        url,
+        headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    )
+    items: list[dict] = []
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            content = resp.read()
+        root = ET.fromstring(content)
+        for it in root.findall(".//item"):
+            title = it.find("title").text if it.find("title") is not None else ""
+            source_tag = it.find("source")
+            source = source_tag.text if source_tag is not None else ""
+            pub_date = it.find("pubDate").text if it.find("pubDate") is not None else ""
+
+            # If publisher source tag was empty, extract from title suffix " - Publisher"
+            if not source and " - " in title:
+                parts = title.rsplit(" - ", 1)
+                title = parts[0].strip()
+                source = parts[1].strip()
+            elif source and title.endswith(f" - {source}"):
+                title = title[:-len(f" - {source}")].strip()
+
+            published_at = ""
+            if pub_date:
+                try:
+                    dt = parsedate_to_datetime(pub_date)
+                    published_at = dt.astimezone(IST).strftime("%Y-%m-%d %H:%M")
+                except Exception:
+                    published_at = pub_date
+
+            items.append({
+                "title": title,
+                "source": source,
+                "publisher": source,
+                "published_at": published_at,
+            })
+            if len(items) >= max_items:
+                break
+    except Exception as exc:
+        import logging
+        logging.getLogger("indian_market_data").warning("Google News RSS fetch failed for '%s': %s", query, exc)
+    return items
+
+
 def filter_curated_news(
     raw_news: list[dict],
     symbol: str,
@@ -149,11 +237,15 @@ def filter_curated_news(
     """Filter news items against curated aliases, negative keywords, and publisher whitelist."""
     meta = WATCHLIST_METADATA.get(symbol)
     if not meta:
-        # The third element is the audit log. Omitting it here used to raise
-        # "not enough values to unpack" for EVERY symbol outside the 6-name
-        # watchlist -- i.e. every Nifty-50 name and every scanner candidate --
-        # which fetch_symbol_context swallows into a bare "no market data".
-        return [], "No news available (untracked symbol)", []
+        if not raw_news:
+            return [], "No news available (untracked symbol)", []
+        # Dynamic fallback for untracked symbols with provided news items
+        meta = {
+            "company_name": symbol,
+            "aliases": [symbol, symbol.upper(), symbol.lower().capitalize()],
+            "negative_keywords": [],
+            "is_bank": False,
+        }
 
     aliases = meta["aliases"]
     negative_kws = meta["negative_keywords"]
@@ -397,6 +489,20 @@ def lazy_fetch_indian_context(
     # News fetch & curated filter
     raw_news = getattr(ticker, "news", []) or []
     filtered_news, news_summary, _ = filter_curated_news(raw_news, symbol)
+
+    # Fallback to Google News RSS if raw_news from yfinance is empty or yields no approved news
+    if not filtered_news and symbol in WATCHLIST_METADATA:
+        try:
+            meta = WATCHLIST_METADATA[symbol]
+            q_term = meta["company_name"] if meta.get("company_name") else f"{symbol} NSE stock"
+            rss_items = fetch_google_news_rss(f"{q_term} when:7d", max_items=10)
+            if rss_items:
+                f_news, n_sum, _ = filter_curated_news(rss_items, symbol, max_items=5)
+                if f_news:
+                    filtered_news = f_news
+                    news_summary = n_sum
+        except Exception:
+            pass
 
     # Fundamentals fetch & strict YoY
     try:

@@ -102,6 +102,24 @@ def gather_overnight_context() -> dict[str, str]:
             ctx["global_markets"] = "; ".join(snapshots)
     except ImportError:
         pass
+
+    # Real Indian stock market news headlines via RSS
+    try:
+        from trading.indian_market_data import fetch_google_news_rss
+        market_news = fetch_google_news_rss("Indian stock market Nifty Sensex when:2d", max_items=8)
+        curated_headlines = []
+        for item in market_news:
+            headline = item.get("title", "").strip()
+            pub = item.get("source", "").strip()
+            if headline:
+                curated_headlines.append(f"{headline} ({pub})" if pub else headline)
+            if len(curated_headlines) >= 5:
+                break
+        if curated_headlines:
+            ctx["news_headlines"] = " | ".join(curated_headlines)
+    except Exception:
+        pass
+
     return ctx
 
 
